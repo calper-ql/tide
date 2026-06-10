@@ -4,7 +4,6 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -123,22 +122,19 @@ func resolveRoot(target string, here bool) (root string, foundRepo bool, err err
 	return project.Resolve(dir)
 }
 
-// resetSequences undoes terminal state the snapshot or the pane stream may
-// have set on the user's real terminal: alt screen, mouse reporting,
-// bracketed paste, app cursor/keypad, scroll region, origin, reverse video,
-// keyboard lock, insert mode, linefeed mode, meta-8bit, cursor shape,
-// palette and default-color overrides, charset, hidden cursor. (SRM [12l is
-// deliberately absent: its polarity is inverted and resetting it would
-// enable local echo.)
-const resetSequences = "\x1b[0m\x1b[?1049l\x1b[?1l\x1b>\x1b[?9l\x1b[?1000l" +
-	"\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?2004l\x1b[?7h\x1b[r" +
-	"\x1b[?5l\x1b[?6l\x1b[?1034l\x1b[2l\x1b[4l\x1b[20l\x1b[ q" +
-	"\x1b]104\a\x1b]110\a\x1b]111\a\x1b(B\x1b[?25h"
+// enterSequences put the client terminal into tide mode: alt screen (the
+// user's shell screen is restored untouched on detach), SGR mouse with
+// button-drag tracking, bracketed paste, focus reporting, and the kitty
+// keyboard protocol pushed for chord disambiguation (Ctrl+Shift+E) —
+// terminals without it ignore the push and the daemon's decoder handles
+// the legacy encoding.
+const enterSequences = "\x1b[?1049h\x1b[?1002h\x1b[?1006h\x1b[?2004h\x1b[?1004h\x1b[>1u\x1b[2J"
 
-// detachKey is the v0 placeholder detach chord (Ctrl+\). The session bar
-// and Ctrl+Shift+E replace it when the chrome lands; until then this is the
-// one key the client steals from the pane.
-const detachKey = 0x1c
+// resetSequences undo everything enterSequences set (in reverse: kitty
+// pop first, alt-screen leave last so the user's screen comes back clean)
+// plus anything the composed render stream may have left (SGR, cursor).
+const resetSequences = "\x1b[<u\x1b[?1004l\x1b[?2004l\x1b[?1006l\x1b[?1002l" +
+	"\x1b[0m\x1b[?25h\x1b[?1049l"
 
 func attach(rt, target string, here bool) error {
 	root, foundRepo, err := resolveRoot(target, here)
@@ -181,7 +177,7 @@ func attach(rt, target string, here bool) error {
 	if !foundRepo {
 		fmt.Printf("[tide] no git repository found — project root is %s\n", root)
 	}
-	fmt.Printf("[tide] attached to %s (%s) — Ctrl+\\ detaches, session keeps running\n",
+	fmt.Printf("[tide] attached to %s (%s) — '-' in the bar or Ctrl+Shift+E detaches\n",
 		info.Root, plural(info.Clients, "client"))
 
 	oldState, err := term.MakeRaw(stdinFd)
@@ -197,6 +193,7 @@ func attach(rt, target string, here bool) error {
 		})
 	}
 	defer restore()
+	os.Stdout.WriteString(enterSequences)
 
 	if _, err := os.Stdout.Write(snap); err != nil {
 		return err
@@ -208,21 +205,14 @@ func attach(rt, target string, here bool) error {
 	}
 	done := make(chan result, 2)
 
-	// Keyboard → pane. Only the detach key is intercepted.
+	// Keyboard/mouse → daemon, raw. The daemon's router owns the keymap;
+	// the client intercepts nothing (spec: one control scheme).
 	go func() {
 		buf := make([]byte, 4096)
 		for {
 			n, rerr := os.Stdin.Read(buf)
 			if n > 0 {
-				data := buf[:n]
-				if i := bytes.IndexByte(data, detachKey); i >= 0 {
-					if i > 0 {
-						_ = client.SendInput(c, append([]byte(nil), data[:i]...))
-					}
-					done <- result{reason: "detached — session keeps running; run 'tide' here to reattach"}
-					return
-				}
-				if serr := client.SendInput(c, append([]byte(nil), data...)); serr != nil {
+				if serr := client.SendInput(c, append([]byte(nil), buf[:n]...)); serr != nil {
 					done <- result{err: serr}
 					return
 				}
@@ -243,17 +233,20 @@ func attach(rt, target string, here bool) error {
 		for {
 			m, rerr := c.Recv()
 			if rerr != nil {
-				done <- result{err: errors.New("daemon connection closed — state is checkpointed; run 'tide' here to reattach")}
+				// EOF here is ambiguous: daemon crash (state checkpointed)
+				// or a kill whose notification we missed — don't promise
+				// either.
+				done <- result{err: errors.New("connection to the daemon closed — run 'tide ls' to check the session")}
 				return
 			}
 			switch m.Type {
-			case protocol.TypeOutput:
+			case protocol.TypeRender:
 				_, _ = os.Stdout.Write(m.Data)
-			case protocol.TypeExit:
-				done <- result{reason: fmt.Sprintf("shell exited (status %d) — run 'tide' here to start a fresh one", m.ExitStatus)}
+			case protocol.TypeDetached:
+				done <- result{reason: "detached — session keeps running; run 'tide' here to reattach"}
 				return
 			case protocol.TypeKilled:
-				done <- result{reason: "session ended by 'tide kill'"}
+				done <- result{reason: "session ended"}
 				return
 			case protocol.TypeDropped:
 				done <- result{reason: "detached by the daemon: " + m.Err + "; run 'tide' here to reattach"}
@@ -313,8 +306,9 @@ func ls(rt string) error {
 		return nil
 	}
 	for _, s := range sessions {
-		fmt.Printf("%s\t%s\tsince %s\n",
-			s.Root, plural(s.Clients, "client"), s.CreatedAt.Local().Format(time.DateTime))
+		fmt.Printf("%s\t%s\t%s\tsince %s\n",
+			s.Root, plural(s.Panes, "pane"), plural(s.Clients, "client"),
+			s.CreatedAt.Local().Format(time.DateTime))
 	}
 	return nil
 }

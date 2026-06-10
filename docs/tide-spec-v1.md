@@ -192,12 +192,21 @@ Capabilities ship as first-party standalone tools that attach to the session
     copy/paste; Ctrl+C always SIGINT). "One control scheme" means the
     platform's CUA convention.
 
+- **Session bar → top** *(ruled 2026-06-10)*. The persistent bar sits at the
+  top of the screen (Zed/browser tab-bar model); tabs join it as they land.
+- **Daemon exits with its last session** *(ruled 2026-06-10)*. Killing the
+  last session ends the daemon process (tmux behavior, minimal footprint);
+  on-demand spawn makes the next `tide` self-healing.
+- **Clipboard model** *(ruled 2026-06-10, implementation consequence of the
+  Ctrl+C ruling)*. Copy writes both a daemon-side internal clipboard and the
+  client's system clipboard via OSC 52; mouse selection additionally feeds
+  PRIMARY (OSC 52 `p`) on Linux. Ctrl+V pastes the internal clipboard
+  (portable without OSC 52 read permission); terminal-native paste arrives
+  as bracketed input and passes through the same guards.
+
 ## Open rulings
 
-1. **Session-bar placement.** Top vs bottom for the persistent bar.
-2. **Daemon process lifecycle.** Exit when the last session is killed, or
-   linger for instant respawn? (Sessions are unaffected either way — detach
-   never kills, and the daemon respawns on demand.)
+None — all v1 rulings are ratified above.
 
 ## Out of scope (v1)
 - General-purpose VT host (arbitrary third-party full-screen apps,

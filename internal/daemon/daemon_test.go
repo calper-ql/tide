@@ -1,11 +1,13 @@
 package daemon
 
 import (
+	"bytes"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -16,13 +18,37 @@ import (
 	"github.com/calper-ql/tide/internal/version"
 )
 
+// logBuf is a concurrency-safe log sink dumped when a test fails.
+type logBuf struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *logBuf) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *logBuf) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
 // start runs a daemon over private dirs and returns its exit channel. Tests
 // must shut it down themselves (a cleanup makes that best-effort).
 func start(t *testing.T, runtimeDir, statePath string) chan error {
 	t.Helper()
+	lb := &logBuf{}
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("daemon log:\n%s", lb.String())
+		}
+	})
 	done := make(chan error, 1)
 	go func() {
-		done <- Run(Options{RuntimeDir: runtimeDir, StatePath: statePath, Log: io.Discard})
+		done <- Run(Options{RuntimeDir: runtimeDir, StatePath: statePath, Log: lb})
 	}()
 	waitUp(t, runtimeDir)
 	t.Cleanup(func() {
@@ -81,8 +107,18 @@ func sessionList(t *testing.T, runtimeDir string) []protocol.SessionInfo {
 func TestSessionSurvivesClientDetachAndEndsOnlyByKill(t *testing.T) {
 	rt := t.TempDir()
 	statePath := filepath.Join(t.TempDir(), "sessions.json")
-	done := start(t, rt, statePath)
+	start(t, rt, statePath)
 	root := t.TempDir()
+	anchor := t.TempDir() // second session so killing root doesn't end the daemon
+
+	x, err := client.Dial(rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := client.Attach(x, anchor, 80, 24); err != nil {
+		t.Fatal(err)
+	}
+	defer x.Close()
 
 	a, err := client.Dial(rt)
 	if err != nil {
@@ -92,7 +128,7 @@ func TestSessionSurvivesClientDetachAndEndsOnlyByKill(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Root != root || info.Clients != 1 {
+	if info.Root != root || info.Clients != 1 || info.Panes != 1 {
 		t.Fatalf("attach info = %+v", info)
 	}
 
@@ -114,8 +150,12 @@ func TestSessionSurvivesClientDetachAndEndsOnlyByKill(t *testing.T) {
 	// Client death is a detach; the session must survive it untouched.
 	a.Close()
 	eventually(t, "detach to register", func() bool {
-		s := sessionList(t, rt)
-		return len(s) == 1 && s[0].Clients == 1
+		for _, s := range sessionList(t, rt) {
+			if s.Root == root {
+				return s.Clients == 1
+			}
+		}
+		return false
 	})
 
 	// Explicit kill: remaining attached clients are told, session is gone.
@@ -133,28 +173,21 @@ func TestSessionSurvivesClientDetachAndEndsOnlyByKill(t *testing.T) {
 		if err != nil {
 			t.Fatalf("attached client should be notified before hangup, got %v", err)
 		}
-		if m.Type == protocol.TypeOutput {
-			continue // pane output queued before the kill is fine
+		if m.Type == protocol.TypeRender {
+			continue // frames queued before the kill are fine
 		}
 		if m.Type != protocol.TypeKilled || m.Root != root {
 			t.Fatalf("notification = %+v", m)
 		}
 		break
 	}
-	if s := sessionList(t, rt); len(s) != 0 {
+	if s := sessionList(t, rt); len(s) != 1 || s[0].Root != anchor {
 		t.Fatalf("sessions after kill = %+v", s)
 	}
 
 	// Killing again must fail loudly, not invent state.
 	if err := client.Kill(k, root); err == nil || !strings.Contains(err.Error(), "no session") {
 		t.Fatalf("second kill err = %v", err)
-	}
-
-	if err := client.Shutdown(k); err != nil {
-		t.Fatal(err)
-	}
-	if err := <-done; err != nil {
-		t.Fatalf("daemon exit: %v", err)
 	}
 }
 

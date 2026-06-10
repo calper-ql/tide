@@ -1,6 +1,7 @@
 package session
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -66,8 +67,47 @@ func TestCorruptStateIsQuarantinedNotFatal(t *testing.T) {
 
 func TestKillUnknownRootIsNotAnError(t *testing.T) {
 	r := NewRegistry(filepath.Join(t.TempDir(), "sessions.json"))
-	killed, err := r.Kill("/no/such")
+	killed, err := r.Kill("/no/such", nil)
 	if err != nil || killed {
 		t.Fatalf("killed=%v err=%v", killed, err)
+	}
+}
+
+func TestPaneContentRoundtripAndKillCleanup(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "sessions.json")
+	r := NewRegistry(statePath)
+	if _, _, err := r.Ensure("/proj/x"); err != nil {
+		t.Fatal(err)
+	}
+	pc := PaneContent{Cols: 80, Rows: 24, Snapshot: []byte("snap"), History: [][]byte{[]byte("h1")}}
+	if err := r.UpdatePaneContent("/proj/x", "pane-abc", pc); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.UpdateLayout("/proj/x", []byte(`{"tabs":[]}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	fresh := NewRegistry(statePath)
+	if _, err := fresh.Load(); err != nil {
+		t.Fatal(err)
+	}
+	s, ok := fresh.Get("/proj/x")
+	var lay struct {
+		Tabs []any `json:"tabs"`
+	}
+	if !ok || json.Unmarshal(s.Layout, &lay) != nil || lay.Tabs == nil {
+		t.Fatalf("layout not persisted: %+v", s)
+	}
+	got, ok := fresh.LoadPaneContent("pane-abc")
+	if !ok || string(got.Snapshot) != "snap" || got.Cols != 80 || len(got.History) != 1 {
+		t.Fatalf("pane content = %+v ok=%v", got, ok)
+	}
+
+	// Kill removes the pane files with the session.
+	if killed, err := fresh.Kill("/proj/x", []string{"pane-abc"}); err != nil || !killed {
+		t.Fatalf("kill: %v %v", killed, err)
+	}
+	if _, ok := fresh.LoadPaneContent("pane-abc"); ok {
+		t.Fatal("pane content must die with its session")
 	}
 }

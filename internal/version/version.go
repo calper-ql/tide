@@ -8,6 +8,7 @@ const (
 
 	// Protocol is the wire-protocol version. Clients and daemons attach
 	// only on an exact match; a mismatch prompts `tide restart`, never an
-	// implicit kill.
-	Protocol = 1
+	// implicit kill. v2: composed render frames replaced the raw pane
+	// output stream when chrome/layout landed.
+	Protocol = 2
 )

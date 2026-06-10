@@ -17,33 +17,25 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
 
-// Session is the durable identity of one project's workspace, plus the
-// last checkpoint of its pane: a screen snapshot (self-contained ANSI) and
-// rendered scrollback lines. Live processes cannot be checkpointed; the
-// content can, which is what "recovery to last checkpoint" promises.
+// Session is the durable identity of one project's workspace plus its
+// layout (tabs/splits as opaque JSON owned by internal/layout). Pane
+// content checkpoints live in their own files; live processes cannot be
+// checkpointed, their content can — which is what "recovery to last
+// checkpoint" promises.
 type Session struct {
-	Root      string    `json:"root"`
-	CreatedAt time.Time `json:"created_at"`
-	PaneUUID  string    `json:"pane_uuid,omitempty"`
-	Cols      int       `json:"cols,omitempty"`
-	Rows      int       `json:"rows,omitempty"`
-	Snapshot  []byte    `json:"snapshot,omitempty"`
-	History   [][]byte  `json:"history,omitempty"`
+	Root      string          `json:"root"`
+	CreatedAt time.Time       `json:"created_at"`
+	Layout    json.RawMessage `json:"layout,omitempty"`
 }
 
-// identity is the subset persisted in sessions.json.
-type identity struct {
-	Root      string    `json:"root"`
-	CreatedAt time.Time `json:"created_at"`
-}
-
-// paneState is the subset persisted per pane.
-type paneState struct {
-	PaneUUID string   `json:"pane_uuid,omitempty"`
+// PaneContent is one pane's checkpointed content: a screen snapshot
+// (self-contained ANSI) and rendered scrollback lines.
+type PaneContent struct {
 	Cols     int      `json:"cols,omitempty"`
 	Rows     int      `json:"rows,omitempty"`
 	Snapshot []byte   `json:"snapshot,omitempty"`
@@ -61,8 +53,11 @@ func NewRegistry(statePath string) *Registry {
 	return &Registry{statePath: statePath, sessions: map[string]Session{}}
 }
 
-func (r *Registry) paneFile(root string) string {
-	sum := sha256.Sum256([]byte(root))
+// paneFile maps a pane id to its content file. Pane ids are hex uuids the
+// daemon generates, but they cross the protocol boundary, so they are
+// hashed rather than trusted as path components.
+func (r *Registry) paneFile(paneID string) string {
+	sum := sha256.Sum256([]byte(paneID))
 	return filepath.Join(filepath.Dir(r.statePath), fmt.Sprintf("pane-%x.json", sum[:8]))
 }
 
@@ -81,7 +76,7 @@ func (r *Registry) Load() (quarantined string, err error) {
 	if err != nil {
 		return "", err
 	}
-	var list []identity
+	var list []Session
 	if jsonErr := json.Unmarshal(data, &list); jsonErr != nil {
 		q := fmt.Sprintf("%s.corrupt-%d", r.statePath, time.Now().Unix())
 		if renameErr := os.Rename(r.statePath, q); renameErr != nil {
@@ -89,17 +84,21 @@ func (r *Registry) Load() (quarantined string, err error) {
 		}
 		return q, nil
 	}
-	for _, id := range list {
-		s := Session{Root: id.Root, CreatedAt: id.CreatedAt}
-		if pdata, err := os.ReadFile(r.paneFile(id.Root)); err == nil {
-			var ps paneState
-			if json.Unmarshal(pdata, &ps) == nil {
-				s.PaneUUID, s.Cols, s.Rows, s.Snapshot, s.History = ps.PaneUUID, ps.Cols, ps.Rows, ps.Snapshot, ps.History
-			}
-		}
+	for _, s := range list {
 		r.sessions[s.Root] = s
 	}
 	return "", nil
+}
+
+// LoadPaneContent reads one pane's checkpoint; a missing or corrupt file
+// only costs that pane's content, never the session.
+func (r *Registry) LoadPaneContent(paneID string) (PaneContent, bool) {
+	var pc PaneContent
+	data, err := os.ReadFile(r.paneFile(paneID))
+	if err != nil || json.Unmarshal(data, &pc) != nil {
+		return PaneContent{}, false
+	}
+	return pc, true
 }
 
 // Ensure returns the session for root, creating it if needed. A creation
@@ -119,10 +118,10 @@ func (r *Registry) Ensure(root string) (s Session, created bool, err error) {
 	return s, true, nil
 }
 
-// Kill removes root's session and its pane checkpoint. The prime rule
-// lives here: this is the only removal path, and only explicit user
+// Kill removes root's session and the checkpoints of its panes. The prime
+// rule lives here: this is the only removal path, and only explicit user
 // actions reach it.
-func (r *Registry) Kill(root string) (bool, error) {
+func (r *Registry) Kill(root string, paneIDs []string) (bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	s, ok := r.sessions[root]
@@ -134,8 +133,38 @@ func (r *Registry) Kill(root string) (bool, error) {
 		r.sessions[root] = s
 		return false, err
 	}
-	_ = os.Remove(r.paneFile(root))
+	for _, id := range paneIDs {
+		_ = os.Remove(r.paneFile(id))
+	}
 	return true, nil
+}
+
+// RemovePaneContent deletes one pane's checkpoint (the pane was closed,
+// its session lives on).
+func (r *Registry) RemovePaneContent(paneID string) {
+	_ = os.Remove(r.paneFile(paneID))
+}
+
+// SweepPaneFiles deletes pane-content files referenced by no live pane id —
+// strays from crashes between a structural change and its cleanup. The
+// caller must NOT sweep after a quarantine: the quarantined state still
+// references those files, and they are the manual-recovery story.
+func (r *Registry) SweepPaneFiles(activeIDs []string) {
+	keep := map[string]bool{}
+	for _, id := range activeIDs {
+		keep[filepath.Base(r.paneFile(id))] = true
+	}
+	dir := filepath.Dir(r.statePath)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if strings.HasPrefix(name, "pane-") && strings.HasSuffix(name, ".json") && !keep[name] {
+			_ = os.Remove(filepath.Join(dir, name))
+		}
+	}
 }
 
 // Get returns the session for root, if any.
@@ -146,22 +175,34 @@ func (r *Registry) Get(root string) (Session, bool) {
 	return s, ok
 }
 
-// UpdatePane checkpoints a pane's content into its own file. A root with no
-// session (e.g. killed while a checkpoint was pending) is a silent no-op.
-func (r *Registry) UpdatePane(root, uuid string, cols, rows int, snapshot []byte, history [][]byte) error {
+// UpdatePaneContent checkpoints a pane's content into its own file. A root
+// with no session (e.g. killed while a checkpoint was pending) is a silent
+// no-op.
+func (r *Registry) UpdatePaneContent(root, paneID string, pc PaneContent) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.sessions[root]; !ok {
+		return nil
+	}
+	data, err := json.Marshal(pc)
+	if err != nil {
+		return err
+	}
+	return writeFileAtomic(r.paneFile(paneID), data)
+}
+
+// UpdateLayout persists a session's layout tree (opaque to this package).
+// Layout changes are structural and rare, so they ride the identity file.
+func (r *Registry) UpdateLayout(root string, layout json.RawMessage) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	s, ok := r.sessions[root]
 	if !ok {
 		return nil
 	}
-	s.PaneUUID, s.Cols, s.Rows, s.Snapshot, s.History = uuid, cols, rows, snapshot, history
+	s.Layout = layout
 	r.sessions[root] = s
-	data, err := json.Marshal(paneState{PaneUUID: uuid, Cols: cols, Rows: rows, Snapshot: snapshot, History: history})
-	if err != nil {
-		return err
-	}
-	return writeFileAtomic(r.paneFile(root), data)
+	return r.checkpointLocked()
 }
 
 // List returns all sessions sorted by root.
@@ -185,9 +226,9 @@ func (r *Registry) Len() int {
 // checkpointLocked atomically replaces the identity file (temp + rename),
 // so a daemon death mid-write can never corrupt the previous checkpoint.
 func (r *Registry) checkpointLocked() error {
-	list := make([]identity, 0, len(r.sessions))
+	list := make([]Session, 0, len(r.sessions))
 	for _, s := range r.sessions {
-		list = append(list, identity{Root: s.Root, CreatedAt: s.CreatedAt})
+		list = append(list, s)
 	}
 	sort.Slice(list, func(i, j int) bool { return list[i].Root < list[j].Root })
 	data, err := json.MarshalIndent(list, "", "  ")

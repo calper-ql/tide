@@ -29,11 +29,11 @@ const (
 	TypeKilled   = "killed"   // daemon → attached clients: session ended
 
 	// Stream frames; they flow on an attached connection and carry no Seq.
-	TypeInput   = "input"   // client → daemon: keyboard bytes for the pane PTY
-	TypeResize  = "resize"  // client → daemon: the client terminal is Cols x Rows
-	TypeOutput  = "output"  // daemon → attached clients: raw pane output bytes
-	TypeExit    = "exit"    // daemon → attached clients: the pane shell exited
-	TypeDropped = "dropped" // daemon → one client: evicted for not keeping up, see Err
+	TypeInput    = "input"    // client → daemon: raw terminal input bytes (keys, mouse, paste)
+	TypeResize   = "resize"   // client → daemon: the client terminal is Cols x Rows
+	TypeRender   = "render"   // daemon → attached clients: composed screen bytes to write verbatim
+	TypeDetached = "detached" // daemon → one client: detached via UI ('-' button, Ctrl+Shift+E)
+	TypeDropped  = "dropped"  // daemon → one client: evicted for not keeping up, see Err
 )
 
 // Message is the single envelope for every frame; Type selects which fields
@@ -53,11 +53,13 @@ type Message struct {
 	ExitStatus      int           `json:"exit_status,omitempty"`
 }
 
-// SessionInfo is the client-visible view of a session.
+// SessionInfo is the client-visible view of a session (spec: `tide ls`
+// lists path, panes, since-when).
 type SessionInfo struct {
 	Root      string    `json:"root"`
 	CreatedAt time.Time `json:"created_at"`
 	Clients   int       `json:"clients"`
+	Panes     int       `json:"panes,omitempty"`
 }
 
 // Conn frames Messages over a net.Conn. Sends are serialized so the daemon

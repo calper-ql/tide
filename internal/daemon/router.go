@@ -1,0 +1,670 @@
+// The router turns raw client input into action: the single keymap (CUA
+// per the ratified rulings — selection-aware Ctrl+C, guarded Ctrl+V,
+// Ctrl+Shift+E detach), mouse-first chrome interaction, drag selection,
+// border resizing, and pane forwarding with per-pane re-encoding (a pane
+// gets keys encoded for ITS terminal modes, never the client's raw bytes).
+package daemon
+
+import (
+	"bytes"
+	"encoding/base64"
+	"fmt"
+	"time"
+	"unicode"
+
+	"github.com/calper-ql/tide/internal/input"
+	"github.com/calper-ql/tide/internal/layout"
+	"github.com/calper-ql/tide/internal/protocol"
+	"github.com/calper-ql/tide/internal/vt"
+)
+
+const wheelStep = 3
+
+// handleInput is the entry point for a client's raw input bytes.
+func (w *ws) handleInput(conn *protocol.Conn, data []byte) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	c, ok := w.clients[conn]
+	if !ok {
+		return
+	}
+	c.feedGen++
+	for _, ev := range c.decoder.Feed(data) {
+		w.routeEventLocked(conn, ev)
+	}
+	if c.decoder.Pending() {
+		w.armFlushLocked(conn, c.feedGen)
+	}
+}
+
+// armFlushLocked schedules an idle flush for a buffered partial sequence
+// (a lone ESC waiting to see whether it starts a sequence). The generation
+// check makes it a true idle timer: if more bytes arrived since arming,
+// the pending data is a NEWER in-flight sequence whose tail is still on
+// the wire — flushing it would shred it into garbage keystrokes.
+func (w *ws) armFlushLocked(conn *protocol.Conn, gen uint64) {
+	time.AfterFunc(50*time.Millisecond, func() {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		c, ok := w.clients[conn]
+		if !ok || !c.decoder.Pending() {
+			return
+		}
+		if c.feedGen != gen {
+			w.armFlushLocked(conn, c.feedGen) // newer feed: wait for ITS idle window
+			return
+		}
+		for _, ev := range c.decoder.Flush() {
+			w.routeEventLocked(conn, ev)
+		}
+	})
+}
+
+func (w *ws) routeEventLocked(conn *protocol.Conn, ev input.Event) {
+	switch ev.Type {
+	case input.EvKey:
+		w.routeKeyLocked(conn, ev)
+	case input.EvMouse:
+		w.routeMouseLocked(conn, ev)
+	case input.EvPaste:
+		// Terminal-native paste obeys the same guards as Ctrl+V (ruling).
+		w.clearSelectionLocked()
+		w.pasteLocked(conn, append([]byte(nil), ev.Paste...))
+	case input.EvFocus:
+		// The client terminal's focus belongs to the focused pane, when
+		// its app asked for focus reporting.
+		if p := w.panes[w.lay.FocusedPane()]; p != nil && p.term.ModeSnapshot()&vt.ModeFocus != 0 {
+			if ev.Gained {
+				p.input([]byte("\x1b[I"))
+			} else {
+				p.input([]byte("\x1b[O"))
+			}
+		}
+	case input.EvUnknown:
+		// Unknown sequences are terminal chatter addressed to whoever
+		// queried — not a pane app: the VT answers the queries it
+		// implements (DSR/CPR/DA/OSC color) itself, and pane queries never
+		// reach the client terminal. Dropping is safer than forwarding
+		// blind.
+	}
+}
+
+// routeKeyLocked implements the keymap. Order matters: overlays capture
+// everything, then the reserved CUA chords, then the focused pane.
+func (w *ws) routeKeyLocked(conn *protocol.Conn, ev input.Event) {
+	if w.overlay != nil {
+		switch ev.Key {
+		case input.KeyEscape:
+			w.closeOverlayLocked()
+		case input.KeyEnter:
+			w.runFirstEnabledLocked(conn)
+		}
+		return
+	}
+
+	if ev.Mods&input.Ctrl != 0 && ev.Key == input.KeyRune {
+		r := unicode.ToLower(ev.Rune)
+		shift := ev.Mods&input.Shift != 0
+		switch {
+		case r == 'c' && !shift:
+			// The ratified ruling: selection active → copy and clear; no
+			// selection → the byte goes to the pane (SIGINT et al).
+			if w.sel.exists && w.sel.pane == w.lay.FocusedPane() {
+				w.copySelectionLocked(conn)
+				return
+			}
+		case r == 'c' && shift:
+			// Kitty-protocol alias: copy, or explicitly nothing — never a
+			// fall-through control byte (the ruling's WT-mistake guard).
+			if w.sel.exists && w.sel.pane == w.lay.FocusedPane() {
+				w.copySelectionLocked(conn)
+			}
+			return
+		case r == 'v':
+			w.pasteLocked(conn, append([]byte(nil), w.clip...))
+			return
+		case r == 'e' && shift:
+			w.detachClientLocked(conn)
+			return
+		}
+	}
+
+	// Everything else belongs to the focused pane: any keystroke clears the
+	// selection (ruling guardrail) and snaps out of scrollback.
+	w.clearSelectionLocked()
+	focused := w.lay.FocusedPane()
+	p := w.panes[focused]
+	if p == nil {
+		return
+	}
+	w.snapLiveLocked(focused)
+	if b := input.EncodeKey(ev, w.encodeOptsLocked(p)); b != nil {
+		p.input(b)
+	}
+}
+
+// snapLiveLocked returns a scrolled-back pane to the live view; anything
+// that sends input to a pane goes through it, so typing or pasting always
+// lands where the user can see it.
+func (w *ws) snapLiveLocked(paneID string) {
+	if w.scroll[paneID] != 0 {
+		w.scroll[paneID] = 0
+		w.dirtyPanes[paneID] = true
+		w.allDirty = true // bar scroll indicator
+		w.signalRender()
+	}
+}
+
+func (w *ws) encodeOptsLocked(p *pane) input.EncodeOpts {
+	m := p.term.ModeSnapshot()
+	return input.EncodeOpts{
+		AppCursor:      m&vt.ModeAppCursor != 0,
+		AppKeypad:      m&vt.ModeAppKeypad != 0,
+		BracketedPaste: m&vt.ModeBracketedPaste != 0,
+		CRLF:           m&vt.ModeCRLF != 0,
+	}
+}
+
+func (w *ws) routeMouseLocked(conn *protocol.Conn, ev input.Event) {
+	// An app-forwarded press grabs the mouse for its pane: motion and the
+	// release must reach the SAME pane even when the pointer crosses a
+	// border, or the app is left with a stuck button and a neighbor gets a
+	// release it never saw a press for.
+	if w.appGrab != "" {
+		switch ev.Mouse {
+		case input.MouseMotion, input.MouseWheelUp, input.MouseWheelDown:
+			w.forwardMouseClampedLocked(w.appGrab, ev)
+		case input.MouseRelease:
+			w.forwardMouseClampedLocked(w.appGrab, ev)
+			w.appGrab = ""
+		case input.MousePress:
+			w.forwardMouseClampedLocked(w.appGrab, ev)
+		}
+		return
+	}
+
+	// An in-progress border drag owns the mouse.
+	if w.drag != nil {
+		switch ev.Mouse {
+		case input.MouseMotion:
+			var delta int
+			if w.drag.border.Vertical {
+				delta = ev.X - w.drag.lastX
+			} else {
+				delta = ev.Y - w.drag.lastY
+			}
+			if delta != 0 {
+				if tab := w.lay.ActiveTab(); tab != nil {
+					tab.DragBorder(w.drag.border, delta, w.area)
+					w.drag.lastX, w.drag.lastY = ev.X, ev.Y
+					w.recomputeLocked()
+					w.markAllDirtyLocked()
+				}
+			}
+		case input.MouseRelease:
+			w.drag = nil
+			w.checkpointLayoutLocked()
+		}
+		return
+	}
+
+	// An in-progress selection drag owns the mouse.
+	if w.sel.dragging {
+		switch ev.Mouse {
+		case input.MouseMotion:
+			if line, x, ok := w.contentAtLocked(w.sel.pane, ev.X, ev.Y); ok {
+				w.sel.eLine, w.sel.eX = line, x
+				w.dirtyPanes[w.sel.pane] = true
+				w.signalRender()
+			}
+		case input.MouseRelease:
+			w.sel.dragging = false
+			if w.sel.aLine == w.sel.eLine && w.sel.aX == w.sel.eX {
+				w.sel.exists = false
+			} else {
+				w.sel.exists = true
+				// Mouse selection feeds PRIMARY on release (ruling);
+				// CLIPBOARD only on explicit copy.
+				if text := w.selectionTextLocked(); text != "" {
+					w.sendToLocked(conn, protocol.Message{Type: protocol.TypeRender, Data: osc52('p', text)})
+				}
+			}
+			w.dirtyPanes[w.sel.pane] = true
+			w.signalRender()
+		}
+		return
+	}
+
+	hit := w.hitAtLocked(ev.X, ev.Y)
+
+	if ev.Mouse == input.MouseWheelUp || ev.Mouse == input.MouseWheelDown {
+		if hit.kind == hitPane {
+			w.wheelLocked(conn, hit.pane, ev)
+		}
+		return
+	}
+
+	if ev.Mouse == input.MousePress {
+		if w.overlay != nil {
+			switch hit.kind {
+			case hitMenuItem:
+				w.runItemLocked(conn, hit.item)
+			case hitOverlayBody:
+				// swallow
+			default:
+				w.closeOverlayLocked()
+			}
+			return
+		}
+		switch hit.kind {
+		case hitTabLabel:
+			oldFocus := w.lay.FocusedPane()
+			w.lay.SetActive(hit.tab)
+			w.clearSelectionLocked()
+			w.notifyFocusLocked(oldFocus, w.lay.FocusedPane())
+			w.recomputeLocked()
+			w.checkpointLayoutLocked()
+			w.markAllDirtyLocked()
+		case hitNewTab:
+			w.actionNewTabLocked()
+		case hitDetach:
+			w.detachClientLocked(conn)
+		case hitBorder:
+			w.drag = &dragState{border: hit.border, lastX: ev.X, lastY: ev.Y}
+		case hitPane:
+			w.panePressLocked(conn, hit.pane, ev)
+		}
+		return
+	}
+
+	// Motion/release with no drag in progress: an app that asked for
+	// motion gets it.
+	if hit.kind == hitPane {
+		w.forwardMouseLocked(hit.pane, ev)
+	}
+}
+
+// panePressLocked: focus, then right-click menu / dead-pane restart /
+// app forwarding / selection start.
+func (w *ws) panePressLocked(conn *protocol.Conn, paneID string, ev input.Event) {
+	p := w.panes[paneID]
+	if p == nil {
+		return
+	}
+	if w.lay.FocusedPane() != paneID {
+		oldFocus := w.lay.FocusedPane()
+		w.lay.Focus(paneID)
+		// Selections are tied to the focused pane (ruling guardrail): any
+		// focus move clears them, or a later Ctrl+C would interrupt one
+		// pane while a stale selection still highlights another.
+		w.clearSelectionLocked()
+		w.notifyFocusLocked(oldFocus, paneID)
+		w.checkpointLayoutLocked() // focus survives a controlled restart
+		w.markAllDirtyLocked()     // bar title + cursor move
+	}
+	if ev.Button == 3 {
+		w.openMenuLocked(paneID, ev.X, ev.Y)
+		return
+	}
+	if p.isDead() {
+		if err := p.respawnIfDead(w.d.socket); err != nil {
+			w.flashStatusLocked("restart failed: " + err.Error())
+		}
+		w.dirtyPanes[paneID] = true
+		w.signalRender()
+		return
+	}
+	if w.appWantsMouseLocked(p) && ev.Mods&input.Shift == 0 {
+		w.appGrab = paneID // motion/release stay with this pane until release
+		w.forwardMouseLocked(paneID, ev)
+		return
+	}
+	if ev.Button == 1 {
+		w.clearSelectionLocked()
+		if line, x, ok := w.contentAtLocked(paneID, ev.X, ev.Y); ok {
+			w.sel = selectionState{pane: paneID, dragging: true, aLine: line, aX: x, eLine: line, eX: x}
+		}
+	}
+}
+
+func (w *ws) wheelLocked(conn *protocol.Conn, paneID string, ev input.Event) {
+	p := w.panes[paneID]
+	if p == nil {
+		return
+	}
+	if w.appWantsMouseLocked(p) && ev.Mods&input.Shift == 0 {
+		w.forwardMouseLocked(paneID, ev)
+		return
+	}
+	hist, _, _ := p.term.ContentSize()
+	s := w.scroll[paneID]
+	if ev.Mouse == input.MouseWheelUp {
+		s += wheelStep
+	} else {
+		s -= wheelStep
+	}
+	w.scroll[paneID] = clampInt(s, 0, hist)
+	w.dirtyPanes[paneID] = true
+	w.allDirty = true // bar indicator
+	w.signalRender()
+}
+
+// appWantsMouseLocked reports whether the pane's application enabled any
+// mouse reporting; holding Shift always bypasses the app (escape hatch,
+// Zellij convention).
+func (w *ws) appWantsMouseLocked(p *pane) bool {
+	m := p.term.MouseSnapshot()
+	return m.X10 || m.Normal || m.ButtonDrag || m.AnyMotion
+}
+
+// forwardMouseLocked re-encodes a mouse event for the pane's protocol at
+// pane-local coordinates; events outside the pane's rect are dropped.
+func (w *ws) forwardMouseLocked(paneID string, ev input.Event) {
+	w.forwardMouseAtLocked(paneID, ev, false)
+}
+
+// forwardMouseClampedLocked is the grabbed-drag variant: coordinates clamp
+// to the pane's rect instead of dropping, so the app sees a continuous
+// drag even when the pointer leaves the pane.
+func (w *ws) forwardMouseClampedLocked(paneID string, ev input.Event) {
+	w.forwardMouseAtLocked(paneID, ev, true)
+}
+
+func (w *ws) forwardMouseAtLocked(paneID string, ev input.Event, clamp bool) {
+	p := w.panes[paneID]
+	r, ok := w.rects[paneID]
+	if p == nil || !ok || r.W < 1 || r.H < 1 {
+		return
+	}
+	m := p.term.MouseSnapshot()
+	proto := input.MouseOff
+	switch {
+	case m.AnyMotion:
+		proto = input.MouseAnyMotion
+	case m.ButtonDrag:
+		proto = input.MouseButtonMotion
+	case m.Normal:
+		proto = input.MouseNormal
+	case m.X10:
+		proto = input.MouseX10
+	}
+	if proto == input.MouseOff {
+		return
+	}
+	lx, ly := ev.X-r.X, ev.Y-r.Y
+	if clamp {
+		lx, ly = clampInt(lx, 0, r.W-1), clampInt(ly, 0, r.H-1)
+	} else if lx < 0 || ly < 0 || lx >= r.W || ly >= r.H {
+		return
+	}
+	if b := input.EncodeMouse(ev, proto, m.SGR, lx, ly); b != nil {
+		p.input(b)
+	}
+}
+
+// notifyFocusLocked delivers CSI I/O to panes whose applications enabled
+// focus reporting (DECSET 1004).
+func (w *ws) notifyFocusLocked(oldID, newID string) {
+	if oldID == newID {
+		return
+	}
+	if p := w.panes[oldID]; p != nil && p.term.ModeSnapshot()&vt.ModeFocus != 0 {
+		p.input([]byte("\x1b[O"))
+	}
+	if p := w.panes[newID]; p != nil && p.term.ModeSnapshot()&vt.ModeFocus != 0 {
+		p.input([]byte("\x1b[I"))
+	}
+}
+
+// contentAtLocked maps a screen cell to a pane's content coordinates
+// (history-index space), so selections stay glued to their text while
+// output scrolls underneath.
+func (w *ws) contentAtLocked(paneID string, x, y int) (line, col int, ok bool) {
+	r, found := w.rects[paneID]
+	p := w.panes[paneID]
+	if !found || p == nil {
+		return 0, 0, false
+	}
+	hist, _, cols := p.term.ContentSize()
+	ly := clampInt(y-r.Y, 0, r.H-1)
+	lx := clampInt(x-r.X, 0, min(cols, r.W)-1)
+	return hist - w.scroll[paneID] + ly, lx, true
+}
+
+func (w *ws) clearSelectionLocked() {
+	if w.sel.exists || w.sel.dragging {
+		w.dirtyPanes[w.sel.pane] = true
+		w.sel = selectionState{}
+		w.signalRender()
+	}
+}
+
+func (w *ws) selectionTextLocked() string {
+	p := w.panes[w.sel.pane]
+	if p == nil {
+		return ""
+	}
+	l0, x0, l1, x1 := w.sel.normalized()
+	return p.term.ContentText(l0, x0, l1, x1)
+}
+
+// copySelectionLocked implements the copy half of the Ctrl+C ruling: the
+// internal clipboard and the requesting client's system clipboard (OSC 52)
+// both get the text, the selection clears (second Ctrl+C interrupts), and
+// the bar confirms it happened (discoverability).
+func (w *ws) copySelectionLocked(conn *protocol.Conn) {
+	text := w.selectionTextLocked()
+	if text == "" {
+		w.clearSelectionLocked()
+		return
+	}
+	w.clip = []byte(text)
+	w.sendToLocked(conn, protocol.Message{Type: protocol.TypeRender, Data: osc52('c', text)})
+	w.clearSelectionLocked()
+	w.flashStatusLocked(fmt.Sprintf("copied %d chars — Ctrl+C again reaches the shell", len(text)))
+}
+
+func osc52(target byte, text string) []byte {
+	var b bytes.Buffer
+	b.WriteString("\x1b]52;")
+	b.WriteByte(target)
+	b.WriteByte(';')
+	b.WriteString(base64.StdEncoding.EncodeToString([]byte(text)))
+	b.WriteByte('\a')
+	return b.Bytes()
+}
+
+// pasteLocked implements the Ctrl+V ruling: bracketed-paste-aware, and
+// multi-line or control-laden pastes into a bare shell need a confirm
+// (paste guards).
+func (w *ws) pasteLocked(conn *protocol.Conn, data []byte) {
+	if len(data) == 0 {
+		return
+	}
+	focused := w.lay.FocusedPane()
+	p := w.panes[focused]
+	if p == nil {
+		return
+	}
+	w.snapLiveLocked(focused)
+	opts := w.encodeOptsLocked(p)
+	if opts.BracketedPaste || !pasteNeedsConfirm(data) {
+		p.input(input.EncodePaste(data, opts))
+		return
+	}
+	lines := bytes.Count(data, []byte{'\n'}) + 1
+	w.overlay = &overlay{
+		x: w.cols/2 - 20, y: w.rows / 2,
+		title: fmt.Sprintf("Paste %d lines into the shell? (Enter pastes, Esc cancels)", lines),
+		items: []menuItem{
+			{label: "Paste", enabled: true, run: func(w *ws, _ *protocol.Conn) {
+				// Modes can change during the (human-time) confirm window;
+				// re-read them so a pane that enabled bracketed paste
+				// meanwhile gets a properly wrapped paste.
+				if pp := w.panes[w.lay.FocusedPane()]; pp != nil {
+					w.snapLiveLocked(w.lay.FocusedPane())
+					pp.input(input.EncodePaste(data, w.encodeOptsLocked(pp)))
+				}
+			}},
+			{label: "Cancel", enabled: true, run: func(w *ws, _ *protocol.Conn) {}},
+		},
+	}
+	w.markAllDirtyLocked()
+}
+
+// pasteNeedsConfirm flags multi-line pastes and control codes a bare shell
+// would execute or misinterpret (tab is the one benign control).
+func pasteNeedsConfirm(data []byte) bool {
+	for _, c := range data {
+		if c == '\n' || c == '\r' {
+			return true
+		}
+		if c < 0x20 && c != '\t' {
+			return true
+		}
+		if c == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
+// --- chrome actions ----------------------------------------------------
+
+func (w *ws) actionNewTabLocked() {
+	id := newPaneID()
+	p, err := w.spawnPane(id, nil, w.area.W, w.area.H)
+	if err != nil {
+		w.flashStatusLocked("new tab failed: " + err.Error())
+		return
+	}
+	w.panes[id] = p
+	w.lay.NewTab(id)
+	w.clearSelectionLocked()
+	w.recomputeLocked()
+	w.checkpointLayoutLocked()
+	w.markAllDirtyLocked()
+}
+
+func (w *ws) actionSplitLocked(target string, dir layout.Dir) {
+	if _, ok := w.panes[target]; !ok {
+		return
+	}
+	id := newPaneID()
+	r := w.rects[target]
+	p, err := w.spawnPane(id, nil, max(r.W/2, layout.MinPaneW), max(r.H/2, layout.MinPaneH))
+	if err != nil {
+		w.flashStatusLocked("split failed: " + err.Error())
+		return
+	}
+	if err := w.lay.Split(target, dir, id); err != nil {
+		go p.shutdown()
+		return
+	}
+	w.panes[id] = p
+	w.clearSelectionLocked()
+	w.recomputeLocked()
+	w.checkpointLayoutLocked()
+	w.markAllDirtyLocked()
+}
+
+func (w *ws) actionClosePaneLocked(id string) {
+	if w.lay.CountPanes() <= 1 {
+		w.flashStatusLocked("last pane — use Kill Session to end the session")
+		return
+	}
+	p := w.panes[id]
+	if p == nil {
+		return
+	}
+	w.lay.ClosePane(id)
+	delete(w.panes, id)
+	delete(w.scroll, id)
+	if w.sel.pane == id {
+		w.sel = selectionState{}
+	}
+	go func() {
+		p.shutdown()
+		w.d.registry.RemovePaneContent(id)
+	}()
+	w.recomputeLocked()
+	w.checkpointLayoutLocked()
+	w.markAllDirtyLocked()
+}
+
+// openMenuLocked builds the context menu for a pane — the discoverability
+// surface (spec requirement 5): every pane action, visible behind one
+// right-click.
+func (w *ws) openMenuLocked(paneID string, x, y int) {
+	p := w.panes[paneID]
+	if p == nil {
+		return
+	}
+	hasSel := w.sel.exists && w.sel.pane == paneID
+	dead := p.isDead()
+	w.overlay = &overlay{
+		x: x, y: y, pane: paneID,
+		items: []menuItem{
+			{label: "Copy", enabled: hasSel, run: func(w *ws, c *protocol.Conn) { w.copySelectionLocked(c) }},
+			{label: "Paste", enabled: len(w.clip) > 0, run: func(w *ws, c *protocol.Conn) { w.pasteLocked(c, append([]byte(nil), w.clip...)) }},
+			{label: "Split Right", enabled: true, run: func(w *ws, _ *protocol.Conn) { w.actionSplitLocked(paneID, layout.SplitRight) }},
+			{label: "Split Down", enabled: true, run: func(w *ws, _ *protocol.Conn) { w.actionSplitLocked(paneID, layout.SplitDown) }},
+			{label: "New Tab", enabled: true, run: func(w *ws, _ *protocol.Conn) { w.actionNewTabLocked() }},
+			{label: "Restart Shell", enabled: dead, run: func(w *ws, _ *protocol.Conn) {
+				if pp := w.panes[paneID]; pp != nil {
+					_ = pp.respawnIfDead(w.d.socket)
+				}
+			}},
+			{label: "Close Pane", enabled: w.lay.CountPanes() > 1, run: func(w *ws, _ *protocol.Conn) { w.actionClosePaneLocked(paneID) }},
+			{label: "Detach (Ctrl+Shift+E)", enabled: true, run: func(w *ws, c *protocol.Conn) { w.detachClientLocked(c) }},
+			{label: "Kill Session…", enabled: true, run: func(w *ws, _ *protocol.Conn) { w.openKillConfirmLocked() }},
+		},
+	}
+	w.markAllDirtyLocked()
+}
+
+func (w *ws) openKillConfirmLocked() {
+	w.overlay = &overlay{
+		x: w.cols/2 - 22, y: w.rows / 2,
+		title: "Kill this session? Every shell in it dies.",
+		items: []menuItem{
+			{label: "Kill Session", enabled: true, run: func(w *ws, _ *protocol.Conn) {
+				root := w.root
+				d := w.d
+				go d.killFromUI(root) // re-enters the daemon lock; never under w.mu
+			}},
+			{label: "Cancel", enabled: true, run: func(w *ws, _ *protocol.Conn) {}},
+		},
+	}
+	w.markAllDirtyLocked()
+}
+
+func (w *ws) closeOverlayLocked() {
+	if w.overlay != nil {
+		w.overlay = nil
+		w.markAllDirtyLocked()
+	}
+}
+
+func (w *ws) runItemLocked(conn *protocol.Conn, i int) {
+	o := w.overlay
+	if o == nil || i < 0 || i >= len(o.items) || !o.items[i].enabled {
+		return
+	}
+	w.overlay = nil
+	w.markAllDirtyLocked()
+	o.items[i].run(w, conn)
+}
+
+func (w *ws) runFirstEnabledLocked(conn *protocol.Conn) {
+	o := w.overlay
+	if o == nil {
+		return
+	}
+	for i, it := range o.items {
+		if it.enabled {
+			w.runItemLocked(conn, i)
+			return
+		}
+	}
+}

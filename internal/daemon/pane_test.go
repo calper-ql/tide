@@ -18,27 +18,32 @@ func dialAttach(t *testing.T, rt, root string) (*protocol.Conn, []byte) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, snap, err := client.Attach(c, root, 100, 30)
+	_, frame, err := client.Attach(c, root, 100, 30)
 	if err != nil {
 		c.Close()
 		t.Fatal(err)
 	}
-	return c, snap
+	return c, frame
 }
 
-// collectUntil reads stream frames until the accumulated pane output
-// contains want, returning everything read.
-func collectUntil(t *testing.T, c *protocol.Conn, want string) string {
+// collectRender accumulates render frames (on top of seed, normally the
+// attach frame) until the composed output contains want.
+func collectRender(t *testing.T, c *protocol.Conn, seed []byte, want string) string {
 	t.Helper()
 	_ = c.SetDeadline(time.Now().Add(15 * time.Second))
 	defer c.SetDeadline(time.Time{})
 	var sb strings.Builder
+	sb.Write(seed)
 	for !strings.Contains(sb.String(), want) {
 		m, err := c.Recv()
 		if err != nil {
-			t.Fatalf("waiting for %q, got error %v after %q", want, err, sb.String())
+			tail := sb.String()
+			if len(tail) > 300 {
+				tail = tail[len(tail)-300:]
+			}
+			t.Fatalf("waiting for %q, got error %v; tail %q", want, err, tail)
 		}
-		if m.Type == protocol.TypeOutput {
+		if m.Type == protocol.TypeRender {
 			sb.Write(m.Data)
 		}
 	}
@@ -50,105 +55,95 @@ func TestPaneEchoRoundtrip(t *testing.T) {
 	start(t, rt, filepath.Join(t.TempDir(), "sessions.json"))
 	root := t.TempDir()
 
-	c, _ := dialAttach(t, rt, root)
+	c, frame := dialAttach(t, rt, root)
 	defer c.Close()
 	if err := client.SendInput(c, []byte("echo tide-marker-$((40+2))\r")); err != nil {
 		t.Fatal(err)
 	}
-	out := collectUntil(t, c, "tide-marker-42")
-	if !strings.Contains(out, "tide-marker-42") {
-		t.Fatalf("output = %q", out)
-	}
+	collectRender(t, c, frame, "tide-marker-42")
 }
 
 // TestAcceptanceCrashSurvival is the Phase-1 acceptance test from the spec:
 // start a build in a pane, kill the terminal outright (abrupt connection
-// death, no goodbye), reattach from a new terminal — build output intact,
-// mid-keystroke.
+// death, no goodbye), reattach from a new terminal — build output intact
+// (the head via wheel-scrollback, the daemon owns it now), mid-keystroke.
 func TestAcceptanceCrashSurvival(t *testing.T) {
 	rt := t.TempDir()
 	start(t, rt, filepath.Join(t.TempDir(), "sessions.json"))
 	root := t.TempDir()
 
-	a, _ := dialAttach(t, rt, root)
-	// A "build": 60 lines, more than the 30-row screen, so the head must
-	// survive via daemon-side scrollback.
+	a, aframe := dialAttach(t, rt, root)
 	build := "i=1; while [ $i -le 60 ]; do echo build-line-$i; i=$((i+1)); done\r"
 	if err := client.SendInput(a, []byte(build)); err != nil {
 		t.Fatal(err)
 	}
-	collectUntil(t, a, "build-line-60")
+	collectRender(t, a, aframe, "build-line-60")
 
 	// Mid-keystroke: half a command typed, never submitted.
 	if err := client.SendInput(a, []byte("echo par")); err != nil {
 		t.Fatal(err)
 	}
-	collectUntil(t, a, "echo par") // the echo reached the pane grid
+	collectRender(t, a, nil, "echo par")
 
-	// Kill the terminal. No detach message, no cleanup — the connection
-	// just dies.
+	// Kill the terminal: the connection just dies.
 	a.Close()
 
-	// Reattach from a "new terminal": the snapshot must contain the whole
-	// build (head from scrollback, tail on screen) and the half-typed
-	// command.
-	b, snap := dialAttach(t, rt, root)
+	// Reattach: the screen tail and the half-typed command are in the
+	// attach frame.
+	b, bframe := dialAttach(t, rt, root)
 	defer b.Close()
-	for _, want := range []string{"build-line-1", "build-line-35", "build-line-60", "echo par"} {
-		if !bytes.Contains(snap, []byte(want)) {
-			t.Fatalf("reattach snapshot missing %q", want)
+	for _, want := range []string{"build-line-60", "echo par"} {
+		if !bytes.Contains(bframe, []byte(want)) {
+			t.Fatalf("reattach frame missing %q", want)
 		}
 	}
 
-	// Mid-keystroke continuation: finish the half-typed command. The shell
-	// must see "echo partial-zzz" — the first half typed before the crash.
+	// The head of the build scrolled off-screen; the daemon-side scrollback
+	// serves it to the mouse wheel (clients run in the alt screen, native
+	// scrollback is tide's job now).
+	var got string
+	for i := 0; i < 20 && !strings.Contains(got, "build-line-1\r"); i++ {
+		if err := client.SendInput(b, []byte("\x1b[<64;10;10M")); err != nil {
+			t.Fatal(err)
+		}
+		got += collectRender(t, b, nil, "SCROLL")
+	}
+	if !strings.Contains(got, "build-line-1") {
+		t.Fatal("scrollback did not reach the head of the build output")
+	}
+
+	// Mid-keystroke continuation: any key snaps live; finishing the command
+	// must execute "echo partial-zzz" — the first half typed pre-crash.
 	if err := client.SendInput(b, []byte("tial-zzz\r")); err != nil {
 		t.Fatal(err)
 	}
-	out := collectUntil(t, b, "partial-zzz")
-	if !strings.Contains(out, "partial-zzz") {
-		t.Fatalf("continuation output = %q", out)
-	}
+	collectRender(t, b, nil, "partial-zzz")
 }
 
-func TestShellExitNotifiesAndReattachRespawns(t *testing.T) {
+func TestShellExitNoticeAndClickRestarts(t *testing.T) {
 	rt := t.TempDir()
 	start(t, rt, filepath.Join(t.TempDir(), "sessions.json"))
 	root := t.TempDir()
 
-	a, _ := dialAttach(t, rt, root)
-	if err := client.SendInput(a, []byte("exit 7\r")); err != nil {
+	c, frame := dialAttach(t, rt, root)
+	defer c.Close()
+	if err := client.SendInput(c, []byte("exit 7\r")); err != nil {
 		t.Fatal(err)
 	}
-	_ = a.SetDeadline(time.Now().Add(15 * time.Second))
-	for {
-		m, err := a.Recv()
-		if err != nil {
-			t.Fatalf("waiting for exit notice: %v", err)
-		}
-		if m.Type == protocol.TypeExit {
-			if m.ExitStatus != 7 {
-				t.Fatalf("exit status = %d, want 7", m.ExitStatus)
-			}
-			break
-		}
-	}
-	a.Close()
+	collectRender(t, c, frame, "shell exited (status 7)")
 
-	// The session survived the shell's death (prime rule); reattach starts
-	// a fresh shell that works.
+	// The session survives the shell's death (prime rule); clicking the
+	// dead pane restarts it.
 	if s := sessionList(t, rt); len(s) != 1 {
 		t.Fatalf("sessions after shell exit = %+v", s)
 	}
-	b, snap := dialAttach(t, rt, root)
-	defer b.Close()
-	if !bytes.Contains(snap, []byte("shell exited (status 7)")) {
-		t.Fatal("snapshot missing the exit notice")
-	}
-	if err := client.SendInput(b, []byte("echo respawned-ok\r")); err != nil {
+	if err := client.SendInput(c, []byte("\x1b[<0;10;10M\x1b[<0;10;10m")); err != nil {
 		t.Fatal(err)
 	}
-	collectUntil(t, b, "respawned-ok")
+	if err := client.SendInput(c, []byte("echo respawned-ok\r")); err != nil {
+		t.Fatal(err)
+	}
+	collectRender(t, c, nil, "respawned-ok")
 }
 
 func TestPaneContentSurvivesDaemonRestart(t *testing.T) {
@@ -157,16 +152,13 @@ func TestPaneContentSurvivesDaemonRestart(t *testing.T) {
 	done := start(t, rt, statePath)
 	root := t.TempDir()
 
-	a, _ := dialAttach(t, rt, root)
+	a, aframe := dialAttach(t, rt, root)
 	if err := client.SendInput(a, []byte("echo marker-persists\r")); err != nil {
 		t.Fatal(err)
 	}
-	collectUntil(t, a, "marker-persists")
+	collectRender(t, a, aframe, "marker-persists")
 	a.Close()
 
-	// Daemon shutdown checkpoints synchronously; a new daemon over the same
-	// state restores the content into a fresh pane (tier-2 recovery:
-	// processes die, content survives).
 	sd, err := client.Dial(rt)
 	if err != nil {
 		t.Fatal(err)
@@ -180,18 +172,19 @@ func TestPaneContentSurvivesDaemonRestart(t *testing.T) {
 	}
 
 	start(t, rt, statePath)
-	b, snap := dialAttach(t, rt, root)
+	b, bframe := dialAttach(t, rt, root)
 	defer b.Close()
-	if !bytes.Contains(snap, []byte("marker-persists")) {
-		t.Fatal("restored snapshot missing checkpointed content")
+	if !bytes.Contains(bframe, []byte("restored from checkpoint")) {
+		t.Fatal("restored frame missing the restore notice")
 	}
-	if !bytes.Contains(snap, []byte("restored from checkpoint")) {
-		t.Fatal("restored snapshot missing the restore notice")
+	// The marker line scrolled up with the restore notice; it is either on
+	// screen or one wheel-step away.
+	if !bytes.Contains(bframe, []byte("marker-persists")) {
+		if err := client.SendInput(b, []byte("\x1b[<64;10;10M")); err != nil {
+			t.Fatal(err)
+		}
+		collectRender(t, b, nil, "marker-persists")
 	}
-	if err := client.SendInput(b, []byte("echo alive-again\r")); err != nil {
-		t.Fatal(err)
-	}
-	collectUntil(t, b, "alive-again")
 }
 
 func TestResizePropagatesToShell(t *testing.T) {
@@ -201,34 +194,104 @@ func TestResizePropagatesToShell(t *testing.T) {
 
 	c, _ := dialAttach(t, rt, root)
 	defer c.Close()
+	// 73x19 client → bar takes one row → the single pane is 73x18.
 	if err := client.SendResize(c, 73, 19); err != nil {
 		t.Fatal(err)
 	}
-	// stty reads the PTY size the daemon set; eventual because resize is
-	// fire-and-forget.
 	if err := client.SendInput(c, []byte("sleep 0.2; echo size-$(stty size | tr ' ' 'x')\r")); err != nil {
 		t.Fatal(err)
 	}
-	out := collectUntil(t, c, "size-19x73")
-	if !strings.Contains(out, "size-19x73") {
-		t.Fatalf("output = %q", out)
-	}
+	collectRender(t, c, nil, "size-18x73")
 }
 
-func TestMultiClientSeesSameStream(t *testing.T) {
+func TestMultiClientSeesSameComposition(t *testing.T) {
 	rt := t.TempDir()
 	start(t, rt, filepath.Join(t.TempDir(), "sessions.json"))
 	root := t.TempDir()
 
-	a, _ := dialAttach(t, rt, root)
+	a, aframe := dialAttach(t, rt, root)
 	defer a.Close()
-	b, _ := dialAttach(t, rt, root)
+	b, bframe := dialAttach(t, rt, root)
 	defer b.Close()
 
 	marker := fmt.Sprintf("both-see-%d", time.Now().UnixNano())
 	if err := client.SendInput(a, []byte("echo "+marker+"\r")); err != nil {
 		t.Fatal(err)
 	}
-	collectUntil(t, a, marker)
-	collectUntil(t, b, marker)
+	collectRender(t, a, aframe, marker)
+	collectRender(t, b, bframe, marker)
+}
+
+func TestSecondCtrlCInterruptsAfterCopy(t *testing.T) {
+	rt := t.TempDir()
+	start(t, rt, filepath.Join(t.TempDir(), "sessions.json"))
+	root := t.TempDir()
+
+	c, frame := dialAttach(t, rt, root)
+	defer c.Close()
+	if err := client.SendInput(c, []byte("echo select-source-text; sleep 30\r")); err != nil {
+		t.Fatal(err)
+	}
+	collectRender(t, c, frame, "select-source-text")
+
+	// Drag-select across most of the pane (the exact prompt geometry varies
+	// by shell, so the drag spans enough rows to be sure it covers text),
+	// then Ctrl+C: the ruling says copy, not SIGINT — sleep must survive.
+	if err := client.SendInput(c, []byte("\x1b[<0;1;2M\x1b[<32;60;20M\x1b[<0;60;20m")); err != nil {
+		t.Fatal(err)
+	}
+	collectRender(t, c, nil, "\x1b]52;p;") // selection fed PRIMARY
+	if err := client.SendInput(c, []byte{0x03}); err != nil {
+		t.Fatal(err)
+	}
+	collectRender(t, c, nil, "\x1b]52;c;") // copy hit the clipboard
+	collectRender(t, c, nil, "copied")     // and the bar said so
+
+	// Second Ctrl+C: no selection anymore — the byte reaches the shell and
+	// kills the sleep; the next command proves the shell is responsive.
+	if err := client.SendInput(c, []byte{0x03}); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.SendInput(c, []byte("echo after-interrupt\r")); err != nil {
+		t.Fatal(err)
+	}
+	collectRender(t, c, nil, "after-interrupt")
+}
+
+func TestKillingLastSessionExitsDaemon(t *testing.T) {
+	rt := t.TempDir()
+	statePath := filepath.Join(t.TempDir(), "sessions.json")
+	done := start(t, rt, statePath)
+	rootA, rootB := t.TempDir(), t.TempDir()
+
+	a, _ := dialAttach(t, rt, rootA)
+	defer a.Close()
+	b, _ := dialAttach(t, rt, rootB)
+	b.Close() // detach; session B stays
+
+	// Killing one of two sessions leaves the daemon up.
+	k, err := client.Dial(rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Kill(k, rootB); err != nil {
+		t.Fatal(err)
+	}
+	if s := sessionList(t, rt); len(s) != 1 {
+		t.Fatalf("sessions = %+v, want only A", s)
+	}
+
+	// Killing the last session ends the daemon (ruled 2026-06-10).
+	if err := client.Kill(k, rootA); err != nil {
+		t.Fatal(err)
+	}
+	k.Close()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("daemon exit: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("daemon did not exit after its last session was killed")
+	}
 }

@@ -81,8 +81,15 @@ func (t *State) handleCSI() {
 	case 'B', 'e': // CUD, VPR - cursor <n> down
 		t.moveTo(t.cur.X, t.cur.Y+c.maxarg(0, 1))
 	case 'c': // DA - device attributes
-		if c.arg(0, 0) == 0 {
-			// TODO: write vt102 id
+		// tide: applications synchronously probe DA to fingerprint the
+		// terminal, and the query can never reach a real terminal (the
+		// compositor renders grids, not raw streams) — so the VT must
+		// answer. Primary: VT220-class with ANSI color. Secondary
+		// (CSI > c): xterm-style id.
+		if len(c.buf) > 0 && c.buf[0] == '>' {
+			t.w.Write([]byte("\x1b[>41;1;0c"))
+		} else if c.arg(0, 0) == 0 {
+			t.w.Write([]byte("\x1b[?62;22c"))
 		}
 	case 'C', 'a': // CUF, HPR - cursor <n> forward
 		t.moveTo(t.cur.X+c.maxarg(0, 1), t.cur.Y)
