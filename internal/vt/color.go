@@ -1,0 +1,41 @@
+// Ported from vt10x (github.com/hinshun/vt10x), MIT licensed — see LICENSE-vt10x.
+// Local changes are marked with "tide:" comments.
+
+package vt
+
+// ANSI color values
+const (
+	Black Color = iota
+	Red
+	Green
+	Yellow
+	Blue
+	Magenta
+	Cyan
+	LightGrey
+	DarkGrey
+	LightRed
+	LightGreen
+	LightYellow
+	LightBlue
+	LightMagenta
+	LightCyan
+	White
+)
+
+// Default colors are potentially distinct to allow for special behavior.
+// For example, a transparent background. Otherwise, the simple case is to
+// map default colors to another color.
+const (
+	DefaultFG Color = 1<<24 + iota
+	DefaultBG
+	DefaultCursor
+)
+
+// Color maps to the ANSI colors [0, 16) and the xterm colors [16, 256).
+type Color uint32
+
+// ANSI returns true if Color is within [0, 16).
+func (c Color) ANSI() bool {
+	return (c < 16)
+}
