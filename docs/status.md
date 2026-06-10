@@ -1,7 +1,7 @@
 # tide — current state
 
 *Living document; update at the end of each increment.*
-*Last updated 2026-06-11 (HEAD `80a2a30`). Product contract: [tide-spec-v1.md](tide-spec-v1.md).*
+*Last updated 2026-06-11 (HEAD `8e52bca`). Product contract: [tide-spec-v1.md](tide-spec-v1.md).*
 
 ## Where we are
 
@@ -58,13 +58,18 @@ shells get a confirm overlay. Ctrl+Shift+E detaches (kitty keyboard
 protocol; the bar's '-' button covers every terminal). Everything else is
 re-encoded per the destination pane's own terminal modes and forwarded.
 
-**Mouse-first, discoverable.** Click to focus/switch tabs/spawn ('+')/
-detach ('-')/restart dead panes; drag borders to resize; wheel scrolls
-daemon-side scrollback (bar indicator, any key snaps live); right-click
-opens the context menu — Copy/Paste/Split Right/Split Down/New Tab/Restart
-Shell/Close Pane/Detach/Kill Session (confirm dialog). Apps that request
-mouse reporting get translated events with press-grab drag semantics;
-Shift bypasses to tide.
+**Mouse-first, discoverable (pane frames + two menus, ruled 2026-06-11).**
+Every pane is framed from the start; its top border is a bar — title left,
+[≡] pane-menu button right (Copy/Paste/Restart Shell/Close Pane), focused
+pane highlighted. The lower pane's bar is the stacked divider (shared
+edges render once). Frame gestures: press+drag resizes, press+release in
+place opens the layout menu (Split Right/Down, named target; shared edges
+belong to the left/top neighbor). The session bar's project segment (▾)
+opens the session menu (New Tab/Detach/Kill Session…); '+' and '-' stay.
+Nothing requires right-click (macOS Terminal.app never forwards it), but
+it remains a pane-menu accelerator where terminals do. Wheel scrolls
+daemon-side scrollback; apps that request mouse reporting get translated
+events with press-grab drag semantics; Shift bypasses to tide.
 
 **Sessions and persistence.** Identity = canonical project root; layout
 (tabs, splits, ratios, focus) persists in sessions.json on every
@@ -87,9 +92,11 @@ scrubbed environment (spec: capability model).
   `--network=none` (the offline-build constraint re-proven every run).
 - 110 tests, `-race` clean: unit, PTY integration against real shells, the
   spec acceptance test, and UI flows driven through real input bytes.
-- Each increment passes a multi-agent adversarial review before commit;
-  this one fixed 26 confirmed findings (incl. a restore-path data race and
-  a state-file-triggered daemon panic).
+- Substantial increments pass a multi-agent adversarial review before
+  commit (the interaction layer fixed 26 confirmed findings, incl. a
+  restore-path data race and a state-file-triggered daemon panic). The
+  pane-frames redesign is a UX-exploration increment: its deep review is
+  deferred until the feel is validated (ruled with the design).
 
 ## Known v0 limits (accepted, flagged in code)
 
