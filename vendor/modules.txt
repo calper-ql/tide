@@ -1,0 +1,18 @@
+# github.com/clipperhouse/uax29/v2 v2.2.0
+## explicit; go 1.18
+github.com/clipperhouse/uax29/v2/graphemes
+github.com/clipperhouse/uax29/v2/internal/iterators
+# github.com/creack/pty v1.1.24
+## explicit; go 1.18
+github.com/creack/pty
+# github.com/mattn/go-runewidth v0.0.24
+## explicit; go 1.20
+github.com/mattn/go-runewidth
+# golang.org/x/sys v0.46.0
+## explicit; go 1.25.0
+golang.org/x/sys/plan9
+golang.org/x/sys/unix
+golang.org/x/sys/windows
+# golang.org/x/term v0.44.0
+## explicit; go 1.25.0
+golang.org/x/term
