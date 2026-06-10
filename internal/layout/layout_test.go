@@ -59,9 +59,11 @@ func leafNodes(ids ...string) []*Node {
 	return out
 }
 
-// assertTiles asserts the exact-tiling contract: every cell of area is
-// covered by exactly one pane rect or border, nothing escapes area, and
-// border strips are one cell thick along their drag axis.
+// assertTiles asserts the tiling contract: every cell of area is covered
+// by exactly one pane rect or vertical border, nothing escapes area, and
+// every horizontal border is a one-row strip coinciding with the top row
+// of its lower sibling's rect (the lower pane's bar, which doubles as the
+// divider) — so it owns no cells of the tiling itself.
 func assertTiles(t *testing.T, area Rect, rects map[string]Rect, borders []Border) {
 	t.Helper()
 	cover := make([]int, area.W*area.H)
@@ -80,24 +82,60 @@ func assertTiles(t *testing.T, area Rect, rects map[string]Rect, borders []Borde
 		mark(r, "pane "+id)
 	}
 	for _, b := range borders {
-		if b.Vertical && b.Rect.W != 1 {
-			t.Fatalf("vertical border %+v must have W=1", b.Rect)
-		}
-		if !b.Vertical && b.Rect.H != 1 {
-			t.Fatalf("horizontal border %+v must have H=1", b.Rect)
-		}
 		if b.Node == nil {
 			t.Fatalf("border %+v has nil Node", b.Rect)
 		}
 		if b.Index < 0 || b.Index+1 >= len(b.Node.Children) {
 			t.Fatalf("border %+v has invalid Index %d for %d children", b.Rect, b.Index, len(b.Node.Children))
 		}
-		mark(b.Rect, "border")
+		if b.Rect.W <= 0 || b.Rect.H <= 0 {
+			t.Fatalf("border %+v has no cells; empty borders must not be emitted", b.Rect)
+		}
+		if b.Vertical {
+			if b.Rect.W != 1 {
+				t.Fatalf("vertical border %+v must have W=1", b.Rect)
+			}
+			mark(b.Rect, "border")
+		} else if b.Rect.H != 1 {
+			t.Fatalf("horizontal border %+v must have H=1", b.Rect)
+		}
 	}
 	for i, c := range cover {
 		if c != 1 {
 			t.Fatalf("cell (%d,%d) covered %d times, want exactly 1",
 				area.X+i%area.W, area.Y+i/area.W, c)
+		}
+	}
+	// horizontal borders overlap the tiling instead of joining it: every
+	// cell of the strip must sit on the top row of the lower sibling's
+	// rect, i.e. be the top-row cell of a pane under that sibling or the
+	// top cell of a vertical border nested inside it.
+	for _, b := range borders {
+		if b.Vertical {
+			continue
+		}
+		lower := make(map[string]bool)
+		walkLeaves(b.Node.Children[b.Index+1], func(pane string) { lower[pane] = true })
+		for x := b.Rect.X; x < b.Rect.X+b.Rect.W; x++ {
+			ok := false
+			for id, r := range rects {
+				if lower[id] && r.H > 0 && b.Rect.Y == r.Y && x >= r.X && x < r.X+r.W {
+					ok = true
+					break
+				}
+			}
+			if !ok {
+				for _, vb := range borders {
+					if vb.Vertical && vb.Rect.Y == b.Rect.Y && x == vb.Rect.X {
+						ok = true
+						break
+					}
+				}
+			}
+			if !ok {
+				t.Fatalf("horizontal border %+v cell (%d,%d) is not on the top row of its lower sibling",
+					b.Rect, x, b.Rect.Y)
+			}
 		}
 	}
 }
@@ -601,14 +639,14 @@ func TestComputeExactRects(t *testing.T) {
 			wantBorders: []borderShape{{Rect{39, 0, 1, 24}, true, 0}},
 		},
 		{
-			name:  "down split shares height minus the border",
+			name:  "down split tiles the full height; the divider is b's bar row",
 			steps: []step{{"a", SplitDown, "b"}},
 			area:  Rect{0, 0, 80, 24},
 			wantRects: map[string]Rect{
-				"a": {0, 0, 80, 11},
+				"a": {0, 0, 80, 12},
 				"b": {0, 12, 80, 12},
 			},
-			wantBorders: []borderShape{{Rect{0, 11, 80, 1}, false, 0}},
+			wantBorders: []borderShape{{Rect{0, 12, 80, 1}, false, 0}},
 		},
 		{
 			name:  "offset areas keep absolute coordinates",
@@ -640,12 +678,12 @@ func TestComputeExactRects(t *testing.T) {
 			area:  Rect{0, 0, 80, 24},
 			wantRects: map[string]Rect{
 				"a": {0, 0, 39, 24},
-				"b": {40, 0, 40, 11},
+				"b": {40, 0, 40, 12},
 				"c": {40, 12, 40, 12},
 			},
 			wantBorders: []borderShape{
 				{Rect{39, 0, 1, 24}, true, 0},
-				{Rect{40, 11, 40, 1}, false, 0},
+				{Rect{40, 12, 40, 1}, false, 0},
 			},
 		},
 	}
@@ -687,7 +725,7 @@ func TestComputeMinimumClamp(t *testing.T) {
 			panes:  []string{"a", "b"},
 			ratios: []float64{0.01, 0.99},
 			area:   Rect{0, 0, 10, 20},
-			want:   map[string]int{"a": 2, "b": 17},
+			want:   map[string]int{"a": 3, "b": 17},
 		},
 		{
 			name:   "several clamped children all take from the largest",
@@ -861,8 +899,8 @@ func TestDragBorder(t *testing.T) {
 		{"right grows the left child", SplitRight, Rect{0, 0, 80, 24}, 10, [2]int{49, 30}},
 		{"left clamps at MinPaneW", SplitRight, Rect{0, 0, 80, 24}, -100, [2]int{4, 75}},
 		{"right clamps at MinPaneW", SplitRight, Rect{0, 0, 80, 24}, 100, [2]int{75, 4}},
-		{"down grows the top child", SplitDown, Rect{0, 0, 80, 24}, 5, [2]int{16, 7}},
-		{"up clamps at MinPaneH", SplitDown, Rect{0, 0, 80, 24}, -100, [2]int{2, 21}},
+		{"down grows the top child", SplitDown, Rect{0, 0, 80, 24}, 5, [2]int{17, 7}},
+		{"up clamps at MinPaneH", SplitDown, Rect{0, 0, 80, 24}, -100, [2]int{3, 21}},
 		{"degenerate area cannot drag", SplitRight, Rect{0, 0, 7, 3}, 3, [2]int{3, 3}},
 	}
 	for _, tt := range tests {

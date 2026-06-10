@@ -2,33 +2,46 @@ package layout
 
 // geometry: Compute lays a tab's tree into a screen rectangle. All the
 // integer math lives here; the invariant throughout is exact tiling —
-// every split's children plus their one-cell borders sum to the parent
-// extent, so rects never overlap and never leave gaps, even in areas too
-// small for the configured minimums.
+// pane rects plus the one-column vertical borders between side-by-side
+// children sum to the parent extent, so rects never overlap and never
+// leave gaps, even in areas too small for the configured minimums.
+// Stacked (SplitDown) children reserve no divider cells at all: every
+// pane's top row is its bar, so between stacked panes the lower pane's
+// bar IS the divider, and the horizontal Border strip overlaps that row
+// instead of owning cells of its own.
 
-// MinPaneW and MinPaneH are the smallest useful pane in cells. Compute
+// MinPaneW and MinPaneH are the smallest useful pane in cells; MinPaneH
+// counts the pane's bar row plus at least two content rows. Compute
 // overrides ratios sooner than go below them; only degenerate areas (too
 // small to fit every child at minimum) break them, and even then the
 // tiling stays exact.
 const (
 	MinPaneW = 4
-	MinPaneH = 2
+	MinPaneH = 3
 )
 
-// Border is one draggable divider strip between two split siblings.
+// Border is one draggable divider strip between two split siblings. A
+// vertical border owns its one-column strip between side-by-side panes.
+// A horizontal border owns no cells: its Rect coincides with the top row
+// of the lower sibling's rect — that pane's bar, which doubles as the
+// drag handle.
 type Border struct {
-	Rect     Rect  // the 1-cell-thick divider strip (vertical: W=1; horizontal: H=1)
+	Rect     Rect  // the 1-cell-thick divider strip (vertical: W=1; horizontal: H=1, the lower pane's bar row)
 	Vertical bool  // true: divider between side-by-side panes (drag changes widths)
 	Node     *Node // the split node owning it
 	Index    int   // divider sits between Children[Index] and Children[Index+1]
 }
 
 // Compute lays the tab's panes into area, returning every pane's rect and
-// the draggable borders between siblings. Rects and borders tile area
-// exactly: no overlaps, no gaps. In degenerate areas panes may receive
-// zero-sized rects (they still appear in the map) and borders that get no
-// cell are not emitted. A zero or negative area, a nil tab, or an empty
-// tree returns nil maps. Compute never mutates the tree.
+// the draggable borders between siblings. Pane rects and vertical borders
+// tile area exactly: no overlaps, no gaps. Horizontal borders own no
+// cells of their own — each one coincides with the top row of the lower
+// sibling's rect (that pane's bar doubles as the divider). In degenerate
+// areas panes may receive zero-sized rects (they still appear in the map)
+// and borders that get no cell — including horizontal ones whose lower
+// sibling has zero height — are not emitted. A zero or negative area, a
+// nil tab, or an empty tree returns nil maps. Compute never mutates the
+// tree.
 func (t *Tab) Compute(area Rect) (rects map[string]Rect, borders []Border) {
 	if t == nil || t.Root == nil || area.W <= 0 || area.H <= 0 {
 		return nil, nil
@@ -66,11 +79,11 @@ func (t *Tab) DragBorder(b Border, delta int, area Rect) {
 	if len(ratios) != len(n.Children) {
 		ratios = equalRatios(len(n.Children))
 	}
-	extent, minSize := r.W, MinPaneW
+	extent, minSize, gap := r.W, MinPaneW, 1
 	if n.Dir == SplitDown {
-		extent, minSize = r.H, MinPaneH
+		extent, minSize, gap = r.H, MinPaneH, 0
 	}
-	sizes, _ := splitExtents(extent, ratios, minSize)
+	sizes, _ := splitExtents(extent, ratios, minSize, gap)
 	i := b.Index
 	lo, hi := 0, 0
 	if sizes[i] > minSize {
@@ -123,11 +136,11 @@ func computeNode(n *Node, r Rect, rects map[string]Rect, borders *[]Border, node
 		ratios = equalRatios(len(n.Children))
 	}
 	vertical := n.Dir == SplitRight
-	extent, minSize := r.W, MinPaneW
+	extent, minSize, gap := r.W, MinPaneW, 1
 	if !vertical {
-		extent, minSize = r.H, MinPaneH
+		extent, minSize, gap = r.H, MinPaneH, 0
 	}
-	sizes, bcells := splitExtents(extent, ratios, minSize)
+	sizes, bcells := splitExtents(extent, ratios, minSize, gap)
 	pos := r.X
 	if !vertical {
 		pos = r.Y
@@ -138,32 +151,38 @@ func computeNode(n *Node, r Rect, rects map[string]Rect, borders *[]Border, node
 			cr = Rect{X: pos, Y: r.Y, W: sizes[i], H: r.H}
 		} else {
 			cr = Rect{X: r.X, Y: pos, W: r.W, H: sizes[i]}
+			if i > 0 && sizes[i] > 0 && r.W > 0 {
+				// the lower child's top row is its bar, which doubles as the
+				// divider: the border strip overlaps that row, owning no
+				// cells of its own. Zero-height children get no border.
+				br := Rect{X: r.X, Y: pos, W: r.W, H: 1}
+				*borders = append(*borders, Border{Rect: br, Vertical: false, Node: n, Index: i - 1})
+			}
 		}
 		computeNode(c, cr, rects, borders, nodeRects)
 		pos += sizes[i]
-		if i < len(n.Children)-1 && bcells[i] == 1 {
-			var br Rect
-			if vertical {
-				br = Rect{X: pos, Y: r.Y, W: 1, H: r.H}
-			} else {
-				br = Rect{X: r.X, Y: pos, W: r.W, H: 1}
-			}
-			if br.W > 0 && br.H > 0 {
-				*borders = append(*borders, Border{Rect: br, Vertical: vertical, Node: n, Index: i})
+		if vertical && i < len(n.Children)-1 && bcells[i] == 1 {
+			br := Rect{X: pos, Y: r.Y, W: 1, H: r.H}
+			if br.H > 0 {
+				*borders = append(*borders, Border{Rect: br, Vertical: true, Node: n, Index: i})
 			}
 			pos++
 		}
 	}
 }
 
-// splitExtents divides extent cells along a split's axis: the n-1 one-cell
-// borders are reserved first (clamped when even those do not fit — the
-// earliest dividers win), then the children share the remainder by ratio
-// with minSize enforced. When the minimums cannot fit, ratios are
-// overridden: children share equally, possibly at zero size. Invariant:
-// sum(sizes) + sum(bcells) == max(extent, 0), every size >= 0, so the
-// caller's tiling is always exact.
-func splitExtents(extent int, ratios []float64, minSize int) (sizes, bcells []int) {
+// splitExtents divides extent cells along a split's axis. gap is the cell
+// count each divider reserves: 1 for side-by-side children (the shared
+// vertical border column), 0 for stacked children (the lower pane's bar
+// row is the divider, so the children tile the whole extent with no
+// gaps). With gap 1 the n-1 divider cells are reserved first (clamped
+// when even those do not fit — the earliest dividers win), then the
+// children share the remainder by ratio with minSize enforced. When the
+// minimums cannot fit, ratios are overridden: children share equally,
+// possibly at zero size. Invariant: sum(sizes) + sum(bcells) ==
+// max(extent, 0), every size >= 0, so the caller's tiling is always
+// exact.
+func splitExtents(extent int, ratios []float64, minSize, gap int) (sizes, bcells []int) {
 	n := len(ratios)
 	sizes = make([]int, n)
 	if n == 0 {
@@ -173,9 +192,12 @@ func splitExtents(extent int, ratios []float64, minSize int) (sizes, bcells []in
 	if extent <= 0 {
 		return sizes, bcells
 	}
-	nb := min(n-1, extent)
-	for i := range nb {
-		bcells[i] = 1
+	nb := 0
+	if gap > 0 {
+		nb = min(n-1, extent)
+		for i := range nb {
+			bcells[i] = 1
+		}
 	}
 	avail := extent - nb
 	if avail < n*minSize {

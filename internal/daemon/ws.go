@@ -56,6 +56,17 @@ type dragState struct {
 	lastY  int
 }
 
+// pendingPress disambiguates frame gestures (ratified two-menu model):
+// press+motion becomes a border drag (when there is a border to drag),
+// press+release in place opens the layout menu for the owning pane.
+type pendingPress struct {
+	x, y      int
+	pane      string
+	border    layout.Border
+	hasBorder bool
+	moved     bool
+}
+
 type ws struct {
 	d    *daemon
 	root string
@@ -73,7 +84,8 @@ type ws struct {
 	scroll   map[string]int // pane id → scrollback offset (0 = live)
 	sel      selectionState
 	drag     *dragState
-	appGrab  string // pane holding an app-forwarded mouse drag
+	pending  *pendingPress // frame press awaiting drag-vs-click resolution
+	appGrab  string        // pane holding an app-forwarded mouse drag
 	overlay  *overlay
 	hits     []hitRegion
 	clip     []byte // internal clipboard (ratified clipboard model)
@@ -255,12 +267,19 @@ func (w *ws) clientCount() int {
 }
 
 // setSizeLocked applies the virtual screen size (latest-wins across
-// clients) and derives the content area below the top bar (ratified: bar
-// on top).
+// clients) and derives the pane area: below the session bar (ratified:
+// bar on top), inside the outer frame ring (ratified: pane frames — the
+// ring's left/right columns and bottom row belong to the frames).
 func (w *ws) setSizeLocked(cols, rows int) {
 	cols, rows = clampDim(cols, 80), clampDim(rows, 24)
 	w.cols, w.rows = cols, rows
-	w.area = layout.Rect{X: 0, Y: 1, W: cols, H: rows - 1}
+	w.area = layout.Rect{X: 1, Y: 1, W: cols - 2, H: rows - 2}
+}
+
+// contentRect is the part of a pane's rect its grid renders into: the
+// rect minus its top bar row.
+func contentRect(r layout.Rect) layout.Rect {
+	return layout.Rect{X: r.X, Y: r.Y + 1, W: r.W, H: r.H - 1}
 }
 
 // recomputeLocked lays out the active tab and sizes its panes to their
@@ -274,7 +293,8 @@ func (w *ws) recomputeLocked() {
 	w.rects, w.borders = tab.Compute(w.area)
 	for id, r := range w.rects {
 		if p := w.panes[id]; p != nil {
-			p.resize(r.W, r.H)
+			c := contentRect(r)
+			p.resize(c.W, c.H)
 		}
 	}
 }

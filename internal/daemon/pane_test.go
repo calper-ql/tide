@@ -194,14 +194,15 @@ func TestResizePropagatesToShell(t *testing.T) {
 
 	c, _ := dialAttach(t, rt, root)
 	defer c.Close()
-	// 73x19 client → bar takes one row → the single pane is 73x18.
+	// 73x19 client minus session bar, pane bar, bottom ring = 16 rows;
+	// minus the side ring columns = 71 cols.
 	if err := client.SendResize(c, 73, 19); err != nil {
 		t.Fatal(err)
 	}
 	if err := client.SendInput(c, []byte("sleep 0.2; echo size-$(stty size | tr ' ' 'x')\r")); err != nil {
 		t.Fatal(err)
 	}
-	collectRender(t, c, nil, "size-18x73")
+	collectRender(t, c, nil, "size-16x71")
 }
 
 func TestMultiClientSeesSameComposition(t *testing.T) {
@@ -237,7 +238,7 @@ func TestSecondCtrlCInterruptsAfterCopy(t *testing.T) {
 	// Drag-select across most of the pane (the exact prompt geometry varies
 	// by shell, so the drag spans enough rows to be sure it covers text),
 	// then Ctrl+C: the ruling says copy, not SIGINT — sleep must survive.
-	if err := client.SendInput(c, []byte("\x1b[<0;1;2M\x1b[<32;60;20M\x1b[<0;60;20m")); err != nil {
+	if err := client.SendInput(c, []byte("\x1b[<0;3;4M\x1b[<32;60;18M\x1b[<0;60;18m")); err != nil {
 		t.Fatal(err)
 	}
 	collectRender(t, c, nil, "\x1b]52;p;") // selection fed PRIMARY

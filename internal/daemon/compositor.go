@@ -25,19 +25,24 @@ const (
 	hitTabLabel
 	hitNewTab
 	hitDetach
-	hitPane
-	hitBorder
+	hitSessionMenu // the project-name segment (ratified: session menu)
+	hitPane        // pane CONTENT (inside the frame)
+	hitPaneBar     // a pane's top-border bar; doubles as the stacked-divider drag handle
+	hitPaneMenu    // the [≡] button in a pane bar
+	hitBorder      // shared vertical border between side-by-side panes
+	hitFrameEdge   // outer ring cells; owner pane resolved by adjacency
 	hitMenuItem
 	hitOverlayBody // inside an overlay but not on an item: swallow the click
 )
 
 type hitRegion struct {
-	rect   layout.Rect
-	kind   hitKind
-	tab    int
-	pane   string
-	border layout.Border
-	item   int
+	rect      layout.Rect
+	kind      hitKind
+	tab       int
+	pane      string
+	border    layout.Border
+	hasBorder bool // pane bars that are stacked dividers carry their border
+	item      int
 }
 
 // hitAtLocked returns the topmost region under a screen cell; regions are
@@ -70,12 +75,14 @@ type overlay struct {
 }
 
 const (
-	sgrReset  = "\x1b[0m"
-	sgrBar    = "\x1b[0;7m"   // bar: reverse video
-	sgrActive = "\x1b[0;7;1m" // active tab: reverse + bold
-	sgrDim    = "\x1b[0;2m"
-	sgrMenu   = "\x1b[0;48;5;236;38;5;252m" // popup body
-	sgrMenuDi = "\x1b[0;48;5;236;38;5;243m" // disabled item
+	sgrReset   = "\x1b[0m"
+	sgrBar     = "\x1b[0;7m"   // session bar: reverse video
+	sgrActive  = "\x1b[0;7;1m" // active tab: reverse + bold
+	sgrDim     = "\x1b[0;2m"
+	sgrFrame   = "\x1b[0;2m"                 // unfocused pane frames
+	sgrFrameFg = "\x1b[0;1;38;5;6m"          // focused pane bar: bold cyan
+	sgrMenu    = "\x1b[0;48;5;236;38;5;252m" // popup body
+	sgrMenuDi  = "\x1b[0;48;5;236;38;5;243m" // disabled item
 )
 
 func cup(b *bytes.Buffer, y, x int) {
@@ -86,8 +93,9 @@ func cup(b *bytes.Buffer, y, x int) {
 // borders, overlay, cursor. It rebuilds the hitmap as it draws.
 func (w *ws) renderLocked() []byte {
 	// The minimum must exceed the bar's right-side reservation (the detach
-	// button), or its CUP column math goes negative and wraps into panes.
-	if w.cols < 16 || w.rows < 3 {
+	// button) and leave room for session bar + frame ring + a pane bar +
+	// content.
+	if w.cols < 16 || w.rows < 6 {
 		return nil
 	}
 	if w.flash != "" && time.Now().After(w.flashOff) {
@@ -104,18 +112,37 @@ func (w *ws) renderLocked() []byte {
 	w.renderBarLocked(&b)
 
 	if tab := w.lay.ActiveTab(); tab != nil {
-		for id, r := range w.rects {
-			w.hits = append(w.hits, hitRegion{rect: r, kind: hitPane, pane: id})
-			if full || w.dirtyPanes[id] {
-				w.renderPaneLocked(&b, id, r)
+		if full {
+			w.renderFrameLocked(&b)
+		}
+		// Stacked dividers are pane bars: index the horizontal borders by
+		// the bar row they coincide with.
+		barBorder := map[[2]int]layout.Border{}
+		for _, bd := range w.borders {
+			if !bd.Vertical {
+				barBorder[[2]int{bd.Rect.X, bd.Rect.Y}] = bd
 			}
 		}
-		if full {
-			w.renderBordersLocked(&b)
+		focused := w.lay.FocusedPane()
+		for id, r := range w.rects {
+			c := contentRect(r)
+			w.hits = append(w.hits, hitRegion{rect: c, kind: hitPane, pane: id})
+			w.renderPaneBarLocked(&b, id, r, id == focused, barBorder)
+			if full || w.dirtyPanes[id] {
+				w.renderPaneContentLocked(&b, id, c)
+			}
 		}
 		for _, bd := range w.borders {
-			w.hits = append(w.hits, hitRegion{rect: bd.Rect, kind: hitBorder, border: bd})
+			if bd.Vertical {
+				w.hits = append(w.hits, hitRegion{rect: bd.Rect, kind: hitBorder, border: bd, hasBorder: true})
+			}
 		}
+		// The outer ring: one strip per side, owner resolved by adjacency.
+		w.hits = append(w.hits,
+			hitRegion{rect: layout.Rect{X: 0, Y: w.area.Y, W: 1, H: w.area.H + 1}, kind: hitFrameEdge},
+			hitRegion{rect: layout.Rect{X: w.cols - 1, Y: w.area.Y, W: 1, H: w.area.H + 1}, kind: hitFrameEdge},
+			hitRegion{rect: layout.Rect{X: 0, Y: w.rows - 1, W: w.cols, H: 1}, kind: hitFrameEdge},
+		)
 	}
 	if w.overlay != nil {
 		w.renderOverlayLocked(&b)
@@ -153,7 +180,9 @@ func (w *ws) renderBarLocked(b *bytes.Buffer) {
 	if i := strings.LastIndexByte(base, '/'); i >= 0 && i < len(base)-1 {
 		base = base[i+1:]
 	}
-	col := w.barSeg(b, 0, " "+runewidth.Truncate(base, 24, "…")+" ", sgrBar, hitNone, 0)
+	// The project segment is the session menu button (ratified): New Tab,
+	// Detach, Kill Session live behind it.
+	col := w.barSeg(b, 0, " "+runewidth.Truncate(base, 24, "…")+" ▾", sgrActive, hitSessionMenu, 0)
 	col = w.barSeg(b, col, "▏", sgrBar, hitNone, 0)
 
 	for i, tab := range w.lay.Tabs {
@@ -217,9 +246,104 @@ func sanitizeLabel(s string) string {
 	return b.String()
 }
 
-// renderPaneLocked draws one pane's viewport, applying the scroll offset
-// and inverting the selection.
-func (w *ws) renderPaneLocked(b *bytes.Buffer, id string, r layout.Rect) {
+// renderFrameLocked draws the outer ring and the shared vertical borders
+// (full renders only; bars and contents overwrite their own cells after).
+func (w *ws) renderFrameLocked(b *bytes.Buffer) {
+	b.WriteString(sgrFrame)
+	top, bottom := w.area.Y, w.rows-1
+	// Side columns.
+	for y := top; y < bottom; y++ {
+		cup(b, y, 0)
+		b.WriteString("│")
+		cup(b, y, w.cols-1)
+		b.WriteString("│")
+	}
+	// Vertical shared borders, with their bottom junctions noted.
+	junction := map[int]bool{}
+	for _, bd := range w.borders {
+		if !bd.Vertical {
+			continue
+		}
+		for y := 0; y < bd.Rect.H; y++ {
+			cup(b, bd.Rect.Y+y, bd.Rect.X)
+			b.WriteString("│")
+		}
+		if bd.Rect.Y+bd.Rect.H == bottom {
+			junction[bd.Rect.X] = true
+		}
+	}
+	// Bottom row.
+	cup(b, bottom, 0)
+	b.WriteString("└")
+	for x := 1; x < w.cols-1; x++ {
+		if junction[x] {
+			b.WriteString("┴")
+		} else {
+			b.WriteString("─")
+		}
+	}
+	b.WriteString("┘" + sgrReset)
+}
+
+// renderPaneBarLocked draws a pane's top border as its bar — title left,
+// [≡] menu button right (ratified) — including the junction characters in
+// the flanking border columns. A bar that coincides with a stacked divider
+// carries that border so the router can drag it.
+func (w *ws) renderPaneBarLocked(b *bytes.Buffer, id string, r layout.Rect, focused bool, barBorder map[[2]int]layout.Border) {
+	if r.W < 6 || r.H < 2 {
+		return
+	}
+	p := w.panes[id]
+	style := sgrFrame
+	if focused {
+		style = sgrFrameFg
+	}
+	// Flanking junctions live in the neighboring border/ring columns.
+	atTop := r.Y == w.area.Y
+	left, right := "├", "┤"
+	if atTop {
+		left, right = "┬", "┬"
+		if r.X-1 == 0 {
+			left = "┌"
+		}
+		if r.X+r.W == w.cols-1 {
+			right = "┐"
+		}
+	} else if r.X-1 == 0 {
+		left = "├"
+	}
+	cup(b, r.Y, r.X-1)
+	b.WriteString(style + left)
+
+	title := ""
+	if p != nil {
+		title = sanitizeLabel(p.term.TitleSnapshot())
+	}
+	if title == "" {
+		title = "shell"
+	}
+	if p != nil && p.isDead() {
+		title += " (exited)"
+	}
+	const menu = "[≡]"
+	maxTitle := r.W - 4 - runewidth.StringWidth(menu) // "─ " + title + " " + fill + menu + "─"
+	title = runewidth.Truncate(title, max(maxTitle, 1), "…")
+	tw := runewidth.StringWidth(title)
+	fill := r.W - 4 - tw - runewidth.StringWidth(menu)
+	fmt.Fprintf(b, "─ %s %s%s─", title, strings.Repeat("─", max(fill, 0)), menu)
+	b.WriteString(right + sgrReset)
+
+	bd, hasBorder := barBorder[[2]int{r.X, r.Y}]
+	w.hits = append(w.hits,
+		hitRegion{rect: layout.Rect{X: r.X, Y: r.Y, W: r.W, H: 1}, kind: hitPaneBar, pane: id, border: bd, hasBorder: hasBorder},
+		hitRegion{rect: layout.Rect{X: r.X + r.W - 4, Y: r.Y, W: 4, H: 1}, kind: hitPaneMenu, pane: id},
+	)
+}
+
+// renderPaneContentLocked draws one pane's viewport, applying the scroll
+// offset and inverting the selection. r is the CONTENT rect (inside the
+// frame).
+func (w *ws) renderPaneContentLocked(b *bytes.Buffer, id string, r layout.Rect) {
 	p := w.panes[id]
 	if p == nil || r.W < 1 || r.H < 1 {
 		return
@@ -262,22 +386,6 @@ func (w *ws) renderPaneLocked(b *bytes.Buffer, id string, r layout.Rect) {
 			b.WriteString(sgrActive + tag + sgrReset)
 		}
 	}
-}
-
-func (w *ws) renderBordersLocked(b *bytes.Buffer) {
-	b.WriteString(sgrDim)
-	for _, bd := range w.borders {
-		if bd.Vertical {
-			for y := 0; y < bd.Rect.H; y++ {
-				cup(b, bd.Rect.Y+y, bd.Rect.X)
-				b.WriteString("│")
-			}
-		} else {
-			cup(b, bd.Rect.Y, bd.Rect.X)
-			b.WriteString(strings.Repeat("─", bd.Rect.W))
-		}
-	}
-	b.WriteString(sgrReset)
 }
 
 // renderOverlayLocked draws the popup and records its hit regions last, so
@@ -364,11 +472,12 @@ func (w *ws) placeCursorLocked(b *bytes.Buffer) {
 	if p == nil || !ok || w.scroll[focused] != 0 {
 		return
 	}
+	c := contentRect(r)
 	x, y, visible := p.term.CursorState()
-	if !visible || x >= r.W || y >= r.H {
+	if !visible || x >= c.W || y >= c.H {
 		return
 	}
-	cup(b, r.Y+y, r.X+x)
+	cup(b, c.Y+y, c.X+x)
 	b.WriteString("\x1b[?25h")
 }
 

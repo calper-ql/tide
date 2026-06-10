@@ -12,6 +12,8 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/mattn/go-runewidth"
+
 	"github.com/calper-ql/tide/internal/input"
 	"github.com/calper-ql/tide/internal/layout"
 	"github.com/calper-ql/tide/internal/protocol"
@@ -208,6 +210,29 @@ func (w *ws) routeMouseLocked(conn *protocol.Conn, ev input.Event) {
 		return
 	}
 
+	// A frame press waiting to become either a drag or a click (ratified
+	// gesture model: motion resizes, release-in-place opens the layout
+	// menu for the owning pane).
+	if w.pending != nil {
+		switch ev.Mouse {
+		case input.MouseMotion:
+			if w.pending.hasBorder {
+				w.drag = &dragState{border: w.pending.border, lastX: w.pending.x, lastY: w.pending.y}
+				w.pending = nil
+				w.routeMouseLocked(conn, ev) // re-dispatch into the drag
+				return
+			}
+			w.pending.moved = true // nothing to drag here (outer edge, topmost bar)
+		case input.MouseRelease:
+			p := w.pending
+			w.pending = nil
+			if !p.moved && p.pane != "" {
+				w.openLayoutMenuLocked(p.pane, ev.X, ev.Y)
+			}
+		}
+		return
+	}
+
 	// An in-progress selection drag owns the mouse.
 	if w.sel.dragging {
 		switch ev.Mouse {
@@ -269,8 +294,20 @@ func (w *ws) routeMouseLocked(conn *protocol.Conn, ev input.Event) {
 			w.actionNewTabLocked()
 		case hitDetach:
 			w.detachClientLocked(conn)
+		case hitSessionMenu:
+			w.openSessionMenuLocked(ev.X, ev.Y)
+		case hitPaneMenu:
+			w.focusPaneLocked(hit.pane)
+			w.openPaneMenuLocked(hit.pane, ev.X, ev.Y)
+		case hitPaneBar:
+			w.focusPaneLocked(hit.pane)
+			w.pending = &pendingPress{x: ev.X, y: ev.Y, pane: hit.pane, border: hit.border, hasBorder: hit.hasBorder}
 		case hitBorder:
-			w.drag = &dragState{border: hit.border, lastX: ev.X, lastY: ev.Y}
+			// Shared vertical border: drags resize; a click's layout menu
+			// targets the left neighbor (ratified).
+			w.pending = &pendingPress{x: ev.X, y: ev.Y, pane: w.borderLeftOwnerLocked(hit.border.Rect.X, ev.Y), border: hit.border, hasBorder: true}
+		case hitFrameEdge:
+			w.pending = &pendingPress{x: ev.X, y: ev.Y, pane: w.edgeOwnerLocked(ev.X, ev.Y)}
 		case hitPane:
 			w.panePressLocked(conn, hit.pane, ev)
 		}
@@ -284,6 +321,48 @@ func (w *ws) routeMouseLocked(conn *protocol.Conn, ev input.Event) {
 	}
 }
 
+// focusPaneLocked moves focus with all its invariants: selection clears
+// (ruling guardrail), focus reporting fires, the layout checkpoint keeps
+// focus across a controlled restart.
+func (w *ws) focusPaneLocked(paneID string) {
+	if w.lay.FocusedPane() == paneID || w.panes[paneID] == nil {
+		return
+	}
+	oldFocus := w.lay.FocusedPane()
+	w.lay.Focus(paneID)
+	w.clearSelectionLocked()
+	w.notifyFocusLocked(oldFocus, paneID)
+	w.checkpointLayoutLocked()
+	w.markAllDirtyLocked() // bar styling + cursor move
+}
+
+// borderLeftOwnerLocked resolves a shared vertical border to the pane on
+// its left at the clicked row (ratified: shared edges belong to the
+// left/top neighbor).
+func (w *ws) borderLeftOwnerLocked(borderX, y int) string {
+	for id, r := range w.rects {
+		if r.X+r.W == borderX && y >= r.Y && y < r.Y+r.H {
+			return id
+		}
+	}
+	return ""
+}
+
+// edgeOwnerLocked resolves an outer-ring cell to its adjacent pane.
+func (w *ws) edgeOwnerLocked(x, y int) string {
+	for id, r := range w.rects {
+		switch {
+		case x == 0 && r.X == w.area.X && y >= r.Y && y < r.Y+r.H:
+			return id
+		case x == w.cols-1 && r.X+r.W == w.area.X+w.area.W && y >= r.Y && y < r.Y+r.H:
+			return id
+		case y == w.rows-1 && r.Y+r.H == w.area.Y+w.area.H && x >= r.X && x < r.X+r.W:
+			return id
+		}
+	}
+	return ""
+}
+
 // panePressLocked: focus, then right-click menu / dead-pane restart /
 // app forwarding / selection start.
 func (w *ws) panePressLocked(conn *protocol.Conn, paneID string, ev input.Event) {
@@ -291,19 +370,11 @@ func (w *ws) panePressLocked(conn *protocol.Conn, paneID string, ev input.Event)
 	if p == nil {
 		return
 	}
-	if w.lay.FocusedPane() != paneID {
-		oldFocus := w.lay.FocusedPane()
-		w.lay.Focus(paneID)
-		// Selections are tied to the focused pane (ruling guardrail): any
-		// focus move clears them, or a later Ctrl+C would interrupt one
-		// pane while a stale selection still highlights another.
-		w.clearSelectionLocked()
-		w.notifyFocusLocked(oldFocus, paneID)
-		w.checkpointLayoutLocked() // focus survives a controlled restart
-		w.markAllDirtyLocked()     // bar title + cursor move
-	}
+	w.focusPaneLocked(paneID)
 	if ev.Button == 3 {
-		w.openMenuLocked(paneID, ev.X, ev.Y)
+		// Right-click stays as a pane-menu accelerator where terminals
+		// forward it (ratified); the [≡] button covers the rest.
+		w.openPaneMenuLocked(paneID, ev.X, ev.Y)
 		return
 	}
 	if p.isDead() {
@@ -372,8 +443,12 @@ func (w *ws) forwardMouseClampedLocked(paneID string, ev input.Event) {
 
 func (w *ws) forwardMouseAtLocked(paneID string, ev input.Event, clamp bool) {
 	p := w.panes[paneID]
-	r, ok := w.rects[paneID]
-	if p == nil || !ok || r.W < 1 || r.H < 1 {
+	rr, ok := w.rects[paneID]
+	if p == nil || !ok {
+		return
+	}
+	r := contentRect(rr)
+	if r.W < 1 || r.H < 1 {
 		return
 	}
 	m := p.term.MouseSnapshot()
@@ -418,13 +493,15 @@ func (w *ws) notifyFocusLocked(oldID, newID string) {
 
 // contentAtLocked maps a screen cell to a pane's content coordinates
 // (history-index space), so selections stay glued to their text while
-// output scrolls underneath.
+// output scrolls underneath. Coordinates are relative to the content rect
+// (inside the pane's frame).
 func (w *ws) contentAtLocked(paneID string, x, y int) (line, col int, ok bool) {
-	r, found := w.rects[paneID]
+	rr, found := w.rects[paneID]
 	p := w.panes[paneID]
 	if !found || p == nil {
 		return 0, 0, false
 	}
+	r := contentRect(rr)
 	hist, _, cols := p.term.ContentSize()
 	ly := clampInt(y-r.Y, 0, r.H-1)
 	lx := clampInt(x-r.X, 0, min(cols, r.W)-1)
@@ -592,10 +669,19 @@ func (w *ws) actionClosePaneLocked(id string) {
 	w.markAllDirtyLocked()
 }
 
-// openMenuLocked builds the context menu for a pane — the discoverability
-// surface (spec requirement 5): every pane action, visible behind one
-// right-click.
-func (w *ws) openMenuLocked(paneID string, x, y int) {
+// paneTitleLocked names a pane for menu titles.
+func (w *ws) paneTitleLocked(paneID string) string {
+	if p := w.panes[paneID]; p != nil {
+		if t := sanitizeLabel(p.term.TitleSnapshot()); t != "" {
+			return runewidth.Truncate(t, 16, "…")
+		}
+	}
+	return "shell"
+}
+
+// openPaneMenuLocked is the [≡] button's menu (ratified two-menu model):
+// actions about THIS pane's contents and life.
+func (w *ws) openPaneMenuLocked(paneID string, x, y int) {
 	p := w.panes[paneID]
 	if p == nil {
 		return
@@ -604,18 +690,47 @@ func (w *ws) openMenuLocked(paneID string, x, y int) {
 	dead := p.isDead()
 	w.overlay = &overlay{
 		x: x, y: y, pane: paneID,
+		title: w.paneTitleLocked(paneID),
 		items: []menuItem{
 			{label: "Copy", enabled: hasSel, run: func(w *ws, c *protocol.Conn) { w.copySelectionLocked(c) }},
 			{label: "Paste", enabled: len(w.clip) > 0, run: func(w *ws, c *protocol.Conn) { w.pasteLocked(c, append([]byte(nil), w.clip...)) }},
-			{label: "Split Right", enabled: true, run: func(w *ws, _ *protocol.Conn) { w.actionSplitLocked(paneID, layout.SplitRight) }},
-			{label: "Split Down", enabled: true, run: func(w *ws, _ *protocol.Conn) { w.actionSplitLocked(paneID, layout.SplitDown) }},
-			{label: "New Tab", enabled: true, run: func(w *ws, _ *protocol.Conn) { w.actionNewTabLocked() }},
 			{label: "Restart Shell", enabled: dead, run: func(w *ws, _ *protocol.Conn) {
 				if pp := w.panes[paneID]; pp != nil {
 					_ = pp.respawnIfDead(w.d.socket)
 				}
 			}},
 			{label: "Close Pane", enabled: w.lay.CountPanes() > 1, run: func(w *ws, _ *protocol.Conn) { w.actionClosePaneLocked(paneID) }},
+		},
+	}
+	w.markAllDirtyLocked()
+}
+
+// openLayoutMenuLocked is the frame-click menu: layout adjustments,
+// targeting the owning pane by name (ratified: the menu names its target).
+func (w *ws) openLayoutMenuLocked(paneID string, x, y int) {
+	if w.panes[paneID] == nil {
+		return
+	}
+	title := w.paneTitleLocked(paneID)
+	w.overlay = &overlay{
+		x: x, y: y, pane: paneID,
+		title: "Layout — " + title,
+		items: []menuItem{
+			{label: "Split '" + title + "' Right", enabled: true, run: func(w *ws, _ *protocol.Conn) { w.actionSplitLocked(paneID, layout.SplitRight) }},
+			{label: "Split '" + title + "' Down", enabled: true, run: func(w *ws, _ *protocol.Conn) { w.actionSplitLocked(paneID, layout.SplitDown) }},
+		},
+	}
+	w.markAllDirtyLocked()
+}
+
+// openSessionMenuLocked lives behind the session bar's project segment
+// (ratified): session-level actions.
+func (w *ws) openSessionMenuLocked(x, y int) {
+	w.overlay = &overlay{
+		x: x, y: y,
+		title: "Session",
+		items: []menuItem{
+			{label: "New Tab", enabled: true, run: func(w *ws, _ *protocol.Conn) { w.actionNewTabLocked() }},
 			{label: "Detach (Ctrl+Shift+E)", enabled: true, run: func(w *ws, c *protocol.Conn) { w.detachClientLocked(c) }},
 			{label: "Kill Session…", enabled: true, run: func(w *ws, _ *protocol.Conn) { w.openKillConfirmLocked() }},
 		},

@@ -188,12 +188,13 @@ func TestContextMenuSplitCreatesPaneAndBorder(t *testing.T) {
 	w, conn, s := newTestWS(t)
 	s.waitFor(t, "first frame", func() bool { return s.contains("1:") })
 
-	x, y := hitCenter(t, w, hitPane)
-	w.handleInput(conn, rclick(x, y))
-	w.handleInput(conn, release(x, y))
-	s.waitFor(t, "context menu", func() bool { return s.contains("Split Right") && s.contains("Kill Session") })
+	// A click (press+release, no motion) on the outer frame edge opens the
+	// layout menu for the adjacent pane (ratified two-menu model).
+	w.handleInput(conn, press(0, 5))
+	w.handleInput(conn, release(0, 5))
+	s.waitFor(t, "layout menu", func() bool { return s.contains("Layout — ") && s.contains("Right") })
 
-	menuClick(t, w, conn, "Split Right")
+	menuClick(t, w, conn, "Split '")
 	s.waitFor(t, "two panes", func() bool {
 		w.mu.Lock()
 		defer w.mu.Unlock()
@@ -401,14 +402,100 @@ func TestMouseDragSelectionFeedsPrimary(t *testing.T) {
 		p := w.panes[w.lay.FocusedPane()]
 		p.term.Write([]byte("\rDRAG-TARGET-LINE\r\n"))
 	})
-	// Drag across the first row of the pane (screen row 1: below the bar).
-	w.handleInput(conn, press(0, 1))
-	w.handleInput(conn, motion(9, 1))
-	w.handleInput(conn, release(9, 1))
+	// Drag across the first content row (row 2: session bar, pane bar,
+	// then content).
+	w.handleInput(conn, press(1, 2))
+	w.handleInput(conn, motion(10, 2))
+	w.handleInput(conn, release(10, 2))
 	s.waitFor(t, "primary selection write", func() bool { return s.contains("\x1b]52;p;") })
 	withWS(w, func() {
 		if !w.sel.exists {
 			t.Fatal("drag must leave a visible selection")
 		}
 	})
+}
+
+func TestPaneMenuButtonAndSessionMenu(t *testing.T) {
+	w, conn, s := newTestWS(t)
+	s.waitFor(t, "first frame", func() bool { return s.contains("1:") })
+
+	// The [≡] button opens the pane menu (ratified: reachable without
+	// right-click — macOS Terminal.app never forwards those).
+	x, y := hitCenter(t, w, hitPaneMenu)
+	w.handleInput(conn, press(x, y))
+	w.handleInput(conn, release(x, y))
+	s.waitFor(t, "pane menu", func() bool { return s.contains("Close Pane") })
+	withWS(w, func() {
+		for _, it := range w.overlay.items {
+			if strings.HasPrefix(it.label, "Kill Session") || strings.HasPrefix(it.label, "Split") {
+				t.Fatalf("pane menu must not contain %q", it.label)
+			}
+		}
+	})
+	w.handleInput(conn, []byte{0x1b}) // Esc closes
+	time.Sleep(80 * time.Millisecond)
+
+	// The project segment opens the session menu.
+	sx, sy := hitCenter(t, w, hitSessionMenu)
+	w.handleInput(conn, press(sx, sy))
+	w.handleInput(conn, release(sx, sy))
+	s.waitFor(t, "session menu", func() bool { return s.contains("Kill Session") && s.contains("New Tab") })
+}
+
+func TestStackedSplitBarIsDividerAndDraggable(t *testing.T) {
+	w, conn, s := newTestWS(t)
+	s.waitFor(t, "first frame", func() bool { return s.contains("1:") })
+	withWS(w, func() { w.actionSplitLocked(w.lay.FocusedPane(), layout.SplitDown) })
+
+	// The lower pane's bar IS the divider: a hitPaneBar region carrying a
+	// border must appear (and no double border row exists — rects tile).
+	var barX, barY int
+	s.waitFor(t, "divider bar in hitmap", func() bool {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		for _, h := range w.hits {
+			if h.kind == hitPaneBar && h.hasBorder {
+				barX, barY = h.rect.X+h.rect.W/2, h.rect.Y
+				return true
+			}
+		}
+		return false
+	})
+
+	var before map[string]layout.Rect
+	withWS(w, func() {
+		before = map[string]layout.Rect{}
+		for id, r := range w.rects {
+			before[id] = r
+		}
+	})
+	// Drag the bar down: resizes.
+	w.handleInput(conn, press(barX, barY))
+	w.handleInput(conn, motion(barX, barY+3))
+	w.handleInput(conn, release(barX, barY+3))
+	withWS(w, func() {
+		changed := false
+		for id, r := range w.rects {
+			if before[id] != r {
+				changed = true
+			}
+		}
+		if !changed {
+			t.Fatal("bar-divider drag did not resize")
+		}
+	})
+
+	// A click (no motion) on a pane bar opens the layout menu for that pane.
+	var clickX, clickY int
+	withWS(w, func() {
+		for _, h := range w.hits {
+			if h.kind == hitPaneBar {
+				clickX, clickY = h.rect.X+2, h.rect.Y
+				break
+			}
+		}
+	})
+	w.handleInput(conn, press(clickX, clickY))
+	w.handleInput(conn, release(clickX, clickY))
+	s.waitFor(t, "layout menu from bar click", func() bool { return s.contains("Layout — ") })
 }
