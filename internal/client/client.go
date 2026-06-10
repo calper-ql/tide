@@ -144,29 +144,38 @@ func Shutdown(c *protocol.Conn) error {
 
 var rpcSeq atomic.Int64
 
-// rpc is one deadline-bounded request/reply exchange. The deadline is
-// cleared on success so an attach connection can live on as a stream.
+// rpc is one deadline-bounded request/reply exchange. Replies are matched
+// by Seq: on an attached connection, stream frames (pane output, exits)
+// interleave freely with replies and are skipped here — a fast-starting
+// shell can emit its prompt between any request and its reply. The deadline
+// is cleared on success so an attach connection can live on as a stream.
 func rpc(c *protocol.Conn, req protocol.Message) (protocol.Message, error) {
 	req.Seq = rpcSeq.Add(1)
 	_ = c.SetDeadline(time.Now().Add(handshakeTimeout))
 	if err := c.Send(req); err != nil {
 		return protocol.Message{}, err
 	}
-	m, err := c.Recv()
-	if err != nil {
-		return protocol.Message{}, err
-	}
-	_ = c.SetDeadline(time.Time{})
-	switch m.Type {
-	case protocol.TypeOK, protocol.TypeSessions:
-		return m, nil
-	case protocol.TypeError:
-		return m, errors.New(m.Err)
-	case protocol.TypeKilled:
-		// A concurrent `tide kill` can race our reply onto the wire; that
-		// is an answer, not a protocol violation.
-		return m, errors.New("session was killed while this request was in flight")
-	default:
-		return m, fmt.Errorf("unexpected reply %q", m.Type)
+	for {
+		m, err := c.Recv()
+		if err != nil {
+			return protocol.Message{}, err
+		}
+		if m.Type == protocol.TypeKilled {
+			// Terminal regardless of correlation: the session this conn is
+			// attached to was just ended.
+			return m, errors.New("session was killed while this request was in flight")
+		}
+		if m.Seq != req.Seq {
+			continue
+		}
+		_ = c.SetDeadline(time.Time{})
+		switch m.Type {
+		case protocol.TypeOK, protocol.TypeSessions:
+			return m, nil
+		case protocol.TypeError:
+			return m, errors.New(m.Err)
+		default:
+			return m, fmt.Errorf("unexpected reply %q", m.Type)
+		}
 	}
 }
