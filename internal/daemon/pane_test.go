@@ -296,3 +296,49 @@ func TestKillingLastSessionExitsDaemon(t *testing.T) {
 		t.Fatal("daemon did not exit after its last session was killed")
 	}
 }
+
+// TestRestoredPaneDropsStaleInputModes is the regression test for clicks
+// leaking ";40M" fragments into restored panes: the checkpoint snapshot
+// restores the OLD app's mouse-reporting mode, but the restored pane runs
+// a fresh shell — forwarding clicks to it types garbage. The restore path
+// must reset input-affecting modes.
+func TestRestoredPaneDropsStaleInputModes(t *testing.T) {
+	rt := t.TempDir()
+	statePath := filepath.Join(t.TempDir(), "sessions.json")
+	done := start(t, rt, statePath)
+	root := t.TempDir()
+
+	a, aframe := dialAttach(t, rt, root)
+	// The "app" turns mouse reporting on, then the daemon restarts.
+	if err := client.SendInput(a, []byte("printf '\\033[?1002h\\033[?1006h'; echo mouse-on\r")); err != nil {
+		t.Fatal(err)
+	}
+	collectRender(t, a, aframe, "mouse-on")
+	a.Close()
+
+	sd, err := client.Dial(rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Shutdown(sd); err != nil {
+		t.Fatal(err)
+	}
+	sd.Close()
+	if err := <-done; err != nil {
+		t.Fatalf("daemon exit: %v", err)
+	}
+	start(t, rt, statePath)
+
+	b, bframe := dialAttach(t, rt, root)
+	defer b.Close()
+	if !bytes.Contains(bframe, []byte("restored from checkpoint")) {
+		t.Fatal("restored frame missing the restore notice")
+	}
+	// A drag-selection must work — if the stale mouse mode survived, these
+	// events would be forwarded to the fresh shell instead and no PRIMARY
+	// write would ever appear.
+	if err := client.SendInput(b, []byte("\x1b[<0;5;6M\x1b[<32;60;16M\x1b[<0;60;16m")); err != nil {
+		t.Fatal(err)
+	}
+	collectRender(t, b, nil, "\x1b]52;p;")
+}

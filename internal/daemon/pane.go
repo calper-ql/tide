@@ -120,6 +120,14 @@ func newPane(id, root string, stored *session.PaneContent, cols, rows int, socke
 		if len(stored.Snapshot) > 0 {
 			p.term.Write(stored.Snapshot)
 		}
+		// The snapshot faithfully restores the OLD application's input
+		// modes — mouse reporting, bracketed paste, app cursor, alt screen.
+		// This pane runs a FRESH shell that asked for none of them; stale
+		// modes would make the router forward mouse clicks to a shell that
+		// cannot parse them (they echo as ";40M" fragments at the prompt).
+		// Visual content stays; input-affecting modes reset.
+		p.term.Write([]byte("\x1b[?1049l\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l" +
+			"\x1b[?1004l\x1b[?2004l\x1b[?1l\x1b>\x1b[?7h\x1b[?6l\x1b[r\x1b[2l\x1b[4l\x1b[?25h"))
 		p.term.Write([]byte("\x1b[0m\r\n[tide] restored from checkpoint; starting a fresh shell\r\n"))
 	}
 	p.term.Resize(cols, rows)

@@ -27,6 +27,8 @@ type Dir int
 const (
 	SplitRight Dir = iota // new pane to the right (side-by-side, vertical border)
 	SplitDown             // new pane below (stacked, horizontal border)
+	SplitLeft             // new pane to the left: SplitRight's axis, inserted before
+	SplitUp               // new pane above: SplitDown's axis, inserted before
 )
 
 // Layout is one session's complete arrangement: ordered tabs, one active.
@@ -164,7 +166,16 @@ func (l *Layout) SetActive(i int) {
 // (same-direction runs stay flattened into one node); a differing
 // direction nests a new {0.5, 0.5} split in the leaf's place.
 func (l *Layout) Split(target string, d Dir, newPane string) error {
-	if d != SplitRight && d != SplitDown {
+	// Left/Up share their axis with Right/Down; they only insert the new
+	// pane before the target instead of after. Node.Dir stores the axis.
+	axis, before := d, false
+	switch d {
+	case SplitLeft:
+		axis, before = SplitRight, true
+	case SplitUp:
+		axis, before = SplitDown, true
+	case SplitRight, SplitDown:
+	default:
 		return fmt.Errorf("layout: invalid split direction %d", int(d))
 	}
 	if newPane == "" {
@@ -179,16 +190,24 @@ func (l *Layout) Split(target string, d Dir, newPane string) error {
 	}
 	t := l.Tabs[ti]
 	leaf, parent, idx, _ := findLeaf(t.Root, target)
-	if parent != nil && parent.Dir == d {
+	if parent != nil && parent.Dir == axis {
 		fixRatios(parent)
 		half := parent.Ratios[idx] / 2
 		parent.Ratios[idx] = half
-		parent.Ratios = slices.Insert(parent.Ratios, idx+1, half)
-		parent.Children = slices.Insert(parent.Children, idx+1, &Node{Pane: newPane})
+		at := idx + 1
+		if before {
+			at = idx
+		}
+		parent.Ratios = slices.Insert(parent.Ratios, at, half)
+		parent.Children = slices.Insert(parent.Children, at, &Node{Pane: newPane})
 	} else {
+		children := []*Node{{Pane: target}, {Pane: newPane}}
+		if before {
+			children = []*Node{{Pane: newPane}, {Pane: target}}
+		}
 		*leaf = Node{
-			Dir:      d,
-			Children: []*Node{{Pane: target}, {Pane: newPane}},
+			Dir:      axis,
+			Children: children,
 			Ratios:   []float64{0.5, 0.5},
 		}
 	}

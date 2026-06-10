@@ -1060,3 +1060,34 @@ func TestJSONRoundTrip(t *testing.T) {
 		})
 	}
 }
+
+func TestSplitLeftAndUpInsertBefore(t *testing.T) {
+	l := New("a")
+	if err := l.Split("a", SplitLeft, "b"); err != nil {
+		t.Fatal(err)
+	}
+	root := l.Tabs[0].Root
+	if root.Dir != SplitRight || root.Children[0].Pane != "b" || root.Children[1].Pane != "a" {
+		t.Fatalf("SplitLeft must insert before on the horizontal axis: %+v", root)
+	}
+	// Flattening run: another left split of "b" inserts before it.
+	if err := l.Split("b", SplitLeft, "c"); err != nil {
+		t.Fatal(err)
+	}
+	if len(root.Children) != 3 || root.Children[0].Pane != "c" || root.Children[1].Pane != "b" {
+		t.Fatalf("SplitLeft must flatten into the run before the target: %+v", root.Children)
+	}
+	// SplitUp nests on the vertical axis with the new pane first.
+	if err := l.Split("a", SplitUp, "d"); err != nil {
+		t.Fatal(err)
+	}
+	nested := root.Children[2]
+	if nested.Dir != SplitDown || nested.Children[0].Pane != "d" || nested.Children[1].Pane != "a" {
+		t.Fatalf("SplitUp must nest with the new pane above: %+v", nested)
+	}
+	if l.FocusedPane() != "d" {
+		t.Fatalf("focus = %q, want the new pane", l.FocusedPane())
+	}
+	rects, borders := l.Tabs[0].Compute(Rect{X: 0, Y: 0, W: 90, H: 30})
+	assertTiles(t, Rect{X: 0, Y: 0, W: 90, H: 30}, rects, borders)
+}

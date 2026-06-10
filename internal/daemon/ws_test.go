@@ -499,3 +499,77 @@ func TestStackedSplitBarIsDividerAndDraggable(t *testing.T) {
 	w.handleInput(conn, release(clickX, clickY))
 	s.waitFor(t, "layout menu from bar click", func() bool { return s.contains("Layout — ") })
 }
+
+func TestCornerDragResizesBothAxes(t *testing.T) {
+	w, conn, s := newTestWS(t)
+	s.waitFor(t, "first frame", func() bool { return s.contains("1:") })
+	withWS(w, func() {
+		a := w.lay.FocusedPane()
+		w.actionSplitLocked(a, layout.SplitRight) // A | B (focus B)
+		w.actionSplitLocked(w.lay.FocusedPane(), layout.SplitDown)
+	})
+
+	// Corner: the vertical border column at the stacked divider's row.
+	var cx, cy int
+	s.waitFor(t, "corner in layout", func() bool {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		var vb, hb *layout.Border
+		for i := range w.borders {
+			if w.borders[i].Vertical {
+				vb = &w.borders[i]
+			} else {
+				hb = &w.borders[i]
+			}
+		}
+		if vb == nil || hb == nil {
+			return false
+		}
+		cx, cy = vb.Rect.X, hb.Rect.Y
+		return true
+	})
+	// The hitmap rebuilds on the next coalesced render; pressing before
+	// that would hit the pre-split regions.
+	s.waitFor(t, "hitmap rebuilt", func() bool {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		for _, h := range w.hits {
+			if h.kind == hitBorder {
+				return true
+			}
+		}
+		return false
+	})
+
+	type dims struct{ w, h int }
+	snap := func() map[string]dims {
+		out := map[string]dims{}
+		for id, r := range w.rects {
+			out[id] = dims{r.W, r.H}
+		}
+		return out
+	}
+	var before map[string]dims
+	withWS(w, func() { before = snap() })
+
+	w.handleInput(conn, press(cx, cy))
+	w.handleInput(conn, motion(cx-5, cy+3))
+	w.handleInput(conn, release(cx-5, cy+3))
+
+	withWS(w, func() {
+		after := snap()
+		widthChanged, heightChanged := false, false
+		for id, d := range after {
+			if before[id].w != d.w {
+				widthChanged = true
+			}
+			if before[id].h != d.h {
+				heightChanged = true
+			}
+		}
+		if !widthChanged || !heightChanged {
+			t.Fatalf("corner drag must resize both axes: width=%v height=%v\nbefore=%v\nafter=%v",
+				widthChanged, heightChanged, before, after)
+		}
+	})
+}

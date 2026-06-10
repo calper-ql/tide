@@ -571,12 +571,10 @@ func TestFlush(t *testing.T) {
 		{"\x1b[", []Event{wantKey(KeyRune, '[', Alt, "\x1b[")}},
 		{"\x1bO", []Event{wantKey(KeyRune, 'O', Alt, "\x1bO")}},
 		{"\x1b]", []Event{wantKey(KeyRune, ']', Alt, "\x1b]")}},
-		{"\x1b[1;5", []Event{
-			wantKey(KeyRune, '[', Alt, "\x1b["),
-			wantKey(KeyRune, '1', 0, "1"),
-			wantKey(KeyRune, ';', 0, ";"),
-			wantKey(KeyRune, '5', 0, "5"),
-		}},
+		// an introducer WITH body bytes is an unambiguous partial sequence:
+		// dropped whole rather than literalized (mouse-report fragments must
+		// never type into a pane)
+		{"\x1b[1;5", []Event{{Type: EvUnknown, Raw: []byte("\x1b[1;5")}}},
 	}
 	for _, c := range cases {
 		d := NewDecoder()

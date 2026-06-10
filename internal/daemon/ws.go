@@ -50,21 +50,26 @@ func (s selectionState) normalized() (l0, x0, l1, x1 int) {
 	return s.eLine, s.eX, s.aLine, s.aX + 1
 }
 
+// dragState is an active frame drag. A border press near a perpendicular
+// divider grabs both (corner dragging): horizontal motion drives the
+// vertical border, vertical motion the bar divider. Borders are held by
+// value — recompute rebuilds w.borders, but Node+Index stay valid.
 type dragState struct {
-	border layout.Border
-	lastX  int
-	lastY  int
+	v, h       layout.Border
+	hasV, hasH bool
+	lastX      int
+	lastY      int
 }
 
 // pendingPress disambiguates frame gestures (ratified two-menu model):
 // press+motion becomes a border drag (when there is a border to drag),
 // press+release in place opens the layout menu for the owning pane.
 type pendingPress struct {
-	x, y      int
-	pane      string
-	border    layout.Border
-	hasBorder bool
-	moved     bool
+	x, y       int
+	pane       string
+	v, h       layout.Border
+	hasV, hasH bool
+	moved      bool
 }
 
 type ws struct {

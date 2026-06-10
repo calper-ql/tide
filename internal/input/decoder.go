@@ -119,9 +119,15 @@ func forceHead(p []byte) (Event, int, int) {
 	}
 	switch p[1] {
 	case '[', 'O', ']', 'P', 'X', '^', '_':
-		// an unfinished sequence introducer at idle can only have been the
-		// user typing that character with alt held
-		return kev(KeyRune, rune(p[1]), Alt), 2, stEvent
+		if len(p) == 2 {
+			// a bare introducer at idle can only have been the user typing
+			// that character with alt held
+			return kev(KeyRune, rune(p[1]), Alt), 2, stEvent
+		}
+		// Introducer plus body bytes: an unambiguous partial sequence whose
+		// tail never arrived. Literalizing it would type mouse-report
+		// fragments ("0;34;40M") into the pane; drop it whole instead.
+		return Event{Type: EvUnknown}, len(p), stEvent
 	}
 	// ESC + incomplete utf-8 rune
 	r, sz := utf8.DecodeRune(p[1:])

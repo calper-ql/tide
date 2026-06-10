@@ -94,6 +94,13 @@ func (w *ws) routeEventLocked(conn *protocol.Conn, ev input.Event) {
 // routeKeyLocked implements the keymap. Order matters: overlays capture
 // everything, then the reserved CUA chords, then the focused pane.
 func (w *ws) routeKeyLocked(conn *protocol.Conn, ev input.Event) {
+	// Detach must always work — even with an overlay open (a menu must
+	// never hold a client hostage).
+	if ev.Mods&input.Ctrl != 0 && ev.Mods&input.Shift != 0 && ev.Key == input.KeyRune && unicode.ToLower(ev.Rune) == 'e' {
+		w.detachClientLocked(conn)
+		return
+	}
+
 	if w.overlay != nil {
 		switch ev.Key {
 		case input.KeyEscape:
@@ -124,9 +131,6 @@ func (w *ws) routeKeyLocked(conn *protocol.Conn, ev input.Event) {
 			return
 		case r == 'v':
 			w.pasteLocked(conn, append([]byte(nil), w.clip...))
-			return
-		case r == 'e' && shift:
-			w.detachClientLocked(conn)
 			return
 		}
 	}
@@ -185,23 +189,22 @@ func (w *ws) routeMouseLocked(conn *protocol.Conn, ev input.Event) {
 		return
 	}
 
-	// An in-progress border drag owns the mouse.
+	// An in-progress border drag owns the mouse; corner grabs drive both
+	// axes at once.
 	if w.drag != nil {
 		switch ev.Mouse {
 		case input.MouseMotion:
-			var delta int
-			if w.drag.border.Vertical {
-				delta = ev.X - w.drag.lastX
-			} else {
-				delta = ev.Y - w.drag.lastY
-			}
-			if delta != 0 {
-				if tab := w.lay.ActiveTab(); tab != nil {
-					tab.DragBorder(w.drag.border, delta, w.area)
-					w.drag.lastX, w.drag.lastY = ev.X, ev.Y
-					w.recomputeLocked()
-					w.markAllDirtyLocked()
+			dx, dy := ev.X-w.drag.lastX, ev.Y-w.drag.lastY
+			if tab := w.lay.ActiveTab(); tab != nil && (dx != 0 || dy != 0) {
+				if w.drag.hasV && dx != 0 {
+					tab.DragBorder(w.drag.v, dx, w.area)
 				}
+				if w.drag.hasH && dy != 0 {
+					tab.DragBorder(w.drag.h, dy, w.area)
+				}
+				w.drag.lastX, w.drag.lastY = ev.X, ev.Y
+				w.recomputeLocked()
+				w.markAllDirtyLocked()
 			}
 		case input.MouseRelease:
 			w.drag = nil
@@ -216,8 +219,9 @@ func (w *ws) routeMouseLocked(conn *protocol.Conn, ev input.Event) {
 	if w.pending != nil {
 		switch ev.Mouse {
 		case input.MouseMotion:
-			if w.pending.hasBorder {
-				w.drag = &dragState{border: w.pending.border, lastX: w.pending.x, lastY: w.pending.y}
+			if w.pending.hasV || w.pending.hasH {
+				w.drag = &dragState{v: w.pending.v, h: w.pending.h, hasV: w.pending.hasV, hasH: w.pending.hasH,
+					lastX: w.pending.x, lastY: w.pending.y}
 				w.pending = nil
 				w.routeMouseLocked(conn, ev) // re-dispatch into the drag
 				return
@@ -301,11 +305,21 @@ func (w *ws) routeMouseLocked(conn *protocol.Conn, ev input.Event) {
 			w.openPaneMenuLocked(hit.pane, ev.X, ev.Y)
 		case hitPaneBar:
 			w.focusPaneLocked(hit.pane)
-			w.pending = &pendingPress{x: ev.X, y: ev.Y, pane: hit.pane, border: hit.border, hasBorder: hit.hasBorder}
+			p := &pendingPress{x: ev.X, y: ev.Y, pane: hit.pane, h: hit.border, hasH: hit.hasBorder}
+			// A bar press next to a vertical border is a corner grab.
+			if vb, ok := w.cornerVBorderLocked(ev.X, ev.Y); ok {
+				p.v, p.hasV = vb, true
+			}
+			w.pending = p
 		case hitBorder:
 			// Shared vertical border: drags resize; a click's layout menu
 			// targets the left neighbor (ratified).
-			w.pending = &pendingPress{x: ev.X, y: ev.Y, pane: w.borderLeftOwnerLocked(hit.border.Rect.X, ev.Y), border: hit.border, hasBorder: true}
+			p := &pendingPress{x: ev.X, y: ev.Y, pane: w.borderLeftOwnerLocked(hit.border.Rect.X, ev.Y), v: hit.border, hasV: true}
+			// A border press next to a bar divider is a corner grab.
+			if hb, ok := w.cornerHBorderLocked(ev.X, ev.Y); ok {
+				p.h, p.hasH = hb, true
+			}
+			w.pending = p
 		case hitFrameEdge:
 			w.pending = &pendingPress{x: ev.X, y: ev.Y, pane: w.edgeOwnerLocked(ev.X, ev.Y)}
 		case hitPane:
@@ -334,6 +348,41 @@ func (w *ws) focusPaneLocked(paneID string) {
 	w.notifyFocusLocked(oldFocus, paneID)
 	w.checkpointLayoutLocked()
 	w.markAllDirtyLocked() // bar styling + cursor move
+}
+
+// cornerVBorderLocked finds a vertical border within one column of x whose
+// span covers y — the perpendicular half of a corner grab.
+func (w *ws) cornerVBorderLocked(x, y int) (layout.Border, bool) {
+	for _, bd := range w.borders {
+		if !bd.Vertical {
+			continue
+		}
+		if absInt(bd.Rect.X-x) <= 1 && y >= bd.Rect.Y && y < bd.Rect.Y+bd.Rect.H {
+			return bd, true
+		}
+	}
+	return layout.Border{}, false
+}
+
+// cornerHBorderLocked finds a bar divider within one row of y whose span
+// flanks column x.
+func (w *ws) cornerHBorderLocked(x, y int) (layout.Border, bool) {
+	for _, bd := range w.borders {
+		if bd.Vertical {
+			continue
+		}
+		if absInt(bd.Rect.Y-y) <= 1 && x >= bd.Rect.X-1 && x <= bd.Rect.X+bd.Rect.W {
+			return bd, true
+		}
+	}
+	return layout.Border{}, false
+}
+
+func absInt(v int) int {
+	if v < 0 {
+		return -v
+	}
+	return v
 }
 
 // borderLeftOwnerLocked resolves a shared vertical border to the pane on
@@ -717,7 +766,9 @@ func (w *ws) openLayoutMenuLocked(paneID string, x, y int) {
 		title: "Layout — " + title,
 		items: []menuItem{
 			{label: "Split '" + title + "' Right", enabled: true, run: func(w *ws, _ *protocol.Conn) { w.actionSplitLocked(paneID, layout.SplitRight) }},
+			{label: "Split '" + title + "' Left", enabled: true, run: func(w *ws, _ *protocol.Conn) { w.actionSplitLocked(paneID, layout.SplitLeft) }},
 			{label: "Split '" + title + "' Down", enabled: true, run: func(w *ws, _ *protocol.Conn) { w.actionSplitLocked(paneID, layout.SplitDown) }},
+			{label: "Split '" + title + "' Up", enabled: true, run: func(w *ws, _ *protocol.Conn) { w.actionSplitLocked(paneID, layout.SplitUp) }},
 		},
 	}
 	w.markAllDirtyLocked()
