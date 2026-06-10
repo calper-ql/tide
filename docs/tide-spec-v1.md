@@ -204,6 +204,23 @@ Capabilities ship as first-party standalone tools that attach to the session
   (portable without OSC 52 read permission); terminal-native paste arrives
   as bracketed input and passes through the same guards.
 
+- **Pane frames and the two-menu model** *(ruled 2026-06-11)*. Supersedes
+  right-click-only pane chrome: macOS Terminal.app never forwards right
+  clicks through mouse reporting, so no action may require one. Every pane
+  is framed Zellij-style from the start (not just when split); shared
+  edges render once — between stacked panes the lower pane's top bar IS
+  the divider. The pane's top border is its bar: title on the left, a
+  dedicated `[≡]` pane-menu button on the right (Copy, Paste, Restart
+  Shell, Close Pane). Frame edges disambiguate by gesture: press+drag
+  resizes (where a neighbor exists), press+release in place opens the
+  layout menu (Split Right/Down), which names its target pane. A shared
+  vertical border belongs to the pane on its left; a bar-divider row to
+  the pane below; outer edges to their adjacent pane. Right-click stays
+  as a pane-menu accelerator where terminals forward it. The session
+  bar's project-name segment opens the session menu (New Tab, Detach,
+  Kill Session…); '-' quick-detach and '+' stay. Focus is indicated by
+  frame styling.
+
 ## Open rulings
 
 None — all v1 rulings are ratified above.
