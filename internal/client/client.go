@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -81,6 +82,7 @@ func SpawnDaemon() error {
 		return err
 	}
 	cmd := exec.Command(exe, "--daemon")
+	cmd.Dir = "/" // never pin the invoking client's cwd for the daemon's lifetime
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	// stdio defaults to /dev/null; the daemon logs into its runtime dir.
 	if err := cmd.Start(); err != nil {
@@ -94,16 +96,29 @@ func SpawnDaemon() error {
 	return nil
 }
 
-// Attach joins (or creates) root's session on an established connection.
-func Attach(c *protocol.Conn, root string) (protocol.SessionInfo, error) {
-	m, err := rpc(c, protocol.Message{Type: protocol.TypeAttach, Root: root})
+// Attach joins (or creates) root's session on an established connection,
+// reporting the client terminal size. The returned snapshot, written to the
+// client terminal verbatim, recreates the pane exactly; after it, the
+// connection is a stream (input/resize out, output/exit/killed in).
+func Attach(c *protocol.Conn, root string, cols, rows int) (protocol.SessionInfo, []byte, error) {
+	m, err := rpc(c, protocol.Message{Type: protocol.TypeAttach, Root: root, Cols: cols, Rows: rows})
 	if err != nil {
-		return protocol.SessionInfo{}, err
+		return protocol.SessionInfo{}, nil, err
 	}
 	if m.Session == nil {
-		return protocol.SessionInfo{}, errors.New("daemon sent ok without session info")
+		return protocol.SessionInfo{}, nil, errors.New("daemon sent ok without session info")
 	}
-	return *m.Session, nil
+	return *m.Session, m.Data, nil
+}
+
+// SendInput forwards keyboard bytes to the attached pane (fire-and-forget).
+func SendInput(c *protocol.Conn, data []byte) error {
+	return c.Send(protocol.Message{Type: protocol.TypeInput, Data: data})
+}
+
+// SendResize reports a new client terminal size (fire-and-forget).
+func SendResize(c *protocol.Conn, cols, rows int) error {
+	return c.Send(protocol.Message{Type: protocol.TypeResize, Cols: cols, Rows: rows})
 }
 
 // Ls lists live sessions.
@@ -127,9 +142,12 @@ func Shutdown(c *protocol.Conn) error {
 	return err
 }
 
+var rpcSeq atomic.Int64
+
 // rpc is one deadline-bounded request/reply exchange. The deadline is
 // cleared on success so an attach connection can live on as a stream.
 func rpc(c *protocol.Conn, req protocol.Message) (protocol.Message, error) {
+	req.Seq = rpcSeq.Add(1)
 	_ = c.SetDeadline(time.Now().Add(handshakeTimeout))
 	if err := c.Send(req); err != nil {
 		return protocol.Message{}, err

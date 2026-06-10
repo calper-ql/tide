@@ -4,7 +4,7 @@ package main
 
 import (
 	"bufio"
-	"context"
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -15,8 +15,11 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
+
+	"golang.org/x/term"
 
 	"github.com/calper-ql/tide/internal/client"
 	"github.com/calper-ql/tide/internal/daemon"
@@ -120,59 +123,173 @@ func resolveRoot(target string, here bool) (root string, foundRepo bool, err err
 	return project.Resolve(dir)
 }
 
+// resetSequences undoes terminal state the snapshot or the pane stream may
+// have set on the user's real terminal: alt screen, mouse reporting,
+// bracketed paste, app cursor/keypad, scroll region, origin, reverse video,
+// keyboard lock, insert mode, linefeed mode, meta-8bit, cursor shape,
+// palette and default-color overrides, charset, hidden cursor. (SRM [12l is
+// deliberately absent: its polarity is inverted and resetting it would
+// enable local echo.)
+const resetSequences = "\x1b[0m\x1b[?1049l\x1b[?1l\x1b>\x1b[?9l\x1b[?1000l" +
+	"\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?2004l\x1b[?7h\x1b[r" +
+	"\x1b[?5l\x1b[?6l\x1b[?1034l\x1b[2l\x1b[4l\x1b[20l\x1b[ q" +
+	"\x1b]104\a\x1b]110\a\x1b]111\a\x1b(B\x1b[?25h"
+
+// detachKey is the v0 placeholder detach chord (Ctrl+\). The session bar
+// and Ctrl+Shift+E replace it when the chrome lands; until then this is the
+// one key the client steals from the pane.
+const detachKey = 0x1c
+
 func attach(rt, target string, here bool) error {
 	root, foundRepo, err := resolveRoot(target, here)
 	if err != nil {
 		return err
 	}
+	stdinFd := int(os.Stdin.Fd())
+	if !term.IsTerminal(stdinFd) {
+		return errors.New("attach requires a terminal (stdin is not a tty)")
+	}
+	if !term.IsTerminal(int(os.Stdout.Fd())) {
+		// Otherwise the pane stream lands in a file/pipe while the real
+		// terminal sits raw and blank, blindly executing keystrokes.
+		return errors.New("attach requires a terminal (stdout is not a tty)")
+	}
+
+	// Register for resizes before the first size read: daemon spawn can
+	// take a moment, and a resize during it must not be lost.
+	winch := make(chan os.Signal, 1)
+	signal.Notify(winch, syscall.SIGWINCH)
+	defer signal.Stop(winch)
+	cols, rows, err := term.GetSize(stdinFd)
+	if err != nil {
+		return err
+	}
+
 	c, err := client.EnsureDaemon(rt)
 	if err != nil {
 		return err
 	}
 	defer c.Close()
-	info, err := client.Attach(c, root)
+	info, snap, err := client.Attach(c, root, cols, rows)
 	if err != nil {
 		return err
+	}
+	// Self-heal a resize that landed between the size read and the attach.
+	if w, h, gerr := term.GetSize(stdinFd); gerr == nil && (w != cols || h != rows) {
+		_ = client.SendResize(c, w, h)
 	}
 	if !foundRepo {
 		fmt.Printf("[tide] no git repository found — project root is %s\n", root)
 	}
-	fmt.Printf("[tide] attached to %s (%s, since %s)\n",
-		info.Root, plural(info.Clients, "client"), info.CreatedAt.Local().Format(time.DateTime))
-	fmt.Println("[tide] Ctrl+C detaches; the session keeps running. 'tide kill' ends it.")
+	fmt.Printf("[tide] attached to %s (%s) — Ctrl+\\ detaches, session keeps running\n",
+		info.Root, plural(info.Clients, "client"))
 
-	// Any way this client dies — Ctrl+C, SIGTERM, a closed terminal — is a
-	// valid detach (spec: invocation).
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
+	oldState, err := term.MakeRaw(stdinFd)
+	if err != nil {
+		return err
+	}
+	var restoreOnce sync.Once
+	restore := func() {
+		restoreOnce.Do(func() {
+			os.Stdout.WriteString(resetSequences)
+			_ = term.Restore(stdinFd, oldState)
+			fmt.Println()
+		})
+	}
+	defer restore()
 
-	msgs := make(chan protocol.Message)
-	errs := make(chan error, 1)
+	if _, err := os.Stdout.Write(snap); err != nil {
+		return err
+	}
+
+	type result struct {
+		reason string
+		err    error
+	}
+	done := make(chan result, 2)
+
+	// Keyboard → pane. Only the detach key is intercepted.
 	go func() {
+		buf := make([]byte, 4096)
 		for {
-			m, err := c.Recv()
-			if err != nil {
-				errs <- err
+			n, rerr := os.Stdin.Read(buf)
+			if n > 0 {
+				data := buf[:n]
+				if i := bytes.IndexByte(data, detachKey); i >= 0 {
+					if i > 0 {
+						_ = client.SendInput(c, append([]byte(nil), data[:i]...))
+					}
+					done <- result{reason: "detached — session keeps running; run 'tide' here to reattach"}
+					return
+				}
+				if serr := client.SendInput(c, append([]byte(nil), data...)); serr != nil {
+					done <- result{err: serr}
+					return
+				}
+			}
+			if rerr != nil {
+				done <- result{reason: "stdin closed — detached; session keeps running"}
 				return
 			}
-			msgs <- m
 		}
 	}()
+
+	// Pane → screen. outputDone lets teardown wait until this goroutine can
+	// no longer write: a frame landing on the terminal after the reset
+	// sequences would re-corrupt it.
+	outputDone := make(chan struct{})
+	go func() {
+		defer close(outputDone)
+		for {
+			m, rerr := c.Recv()
+			if rerr != nil {
+				done <- result{err: errors.New("daemon connection closed — state is checkpointed; run 'tide' here to reattach")}
+				return
+			}
+			switch m.Type {
+			case protocol.TypeOutput:
+				_, _ = os.Stdout.Write(m.Data)
+			case protocol.TypeExit:
+				done <- result{reason: fmt.Sprintf("shell exited (status %d) — run 'tide' here to start a fresh one", m.ExitStatus)}
+				return
+			case protocol.TypeKilled:
+				done <- result{reason: "session ended by 'tide kill'"}
+				return
+			case protocol.TypeDropped:
+				done <- result{reason: "detached by the daemon: " + m.Err + "; run 'tide' here to reattach"}
+				return
+			}
+		}
+	}()
+
+	hangup := make(chan os.Signal, 1)
+	signal.Notify(hangup, syscall.SIGTERM, syscall.SIGHUP)
+	defer signal.Stop(hangup)
+
+	// teardown stops the output stream before touching the terminal.
+	teardown := func() {
+		c.Close()
+		<-outputDone
+		restore()
+	}
 	for {
 		select {
-		case <-ctx.Done():
-			fmt.Println("\n[tide] detached — session keeps running; run 'tide' here to reattach")
+		case <-winch:
+			if w, h, gerr := term.GetSize(stdinFd); gerr == nil {
+				_ = client.SendResize(c, w, h)
+			}
+		case <-hangup:
+			// Killing the terminal is a valid detach (spec: invocation).
+			teardown()
+			fmt.Println("[tide] detached — session keeps running; run 'tide' here to reattach")
 			return nil
-		case m := <-msgs:
-			if m.Type == protocol.TypeKilled {
-				fmt.Println("[tide] session ended by 'tide kill'")
-				return nil
+		case r := <-done:
+			teardown()
+			if r.err != nil {
+				return r.err
 			}
-		case err := <-errs:
-			if errors.Is(err, io.EOF) {
-				return errors.New("daemon connection closed — state is checkpointed; run 'tide' to respawn and reattach")
-			}
-			return err
+			fmt.Printf("[tide] %s\n", r.reason)
+			return nil
 		}
 	}
 }

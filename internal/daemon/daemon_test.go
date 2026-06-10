@@ -82,13 +82,13 @@ func TestSessionSurvivesClientDetachAndEndsOnlyByKill(t *testing.T) {
 	rt := t.TempDir()
 	statePath := filepath.Join(t.TempDir(), "sessions.json")
 	done := start(t, rt, statePath)
-	root := "/proj/alpha"
+	root := t.TempDir()
 
 	a, err := client.Dial(rt)
 	if err != nil {
 		t.Fatal(err)
 	}
-	info, err := client.Attach(a, root)
+	info, _, err := client.Attach(a, root, 80, 24)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +103,7 @@ func TestSessionSurvivesClientDetachAndEndsOnlyByKill(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer b.Close()
-	info, err = client.Attach(b, root)
+	info, _, err = client.Attach(b, root, 80, 24)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,12 +127,19 @@ func TestSessionSurvivesClientDetachAndEndsOnlyByKill(t *testing.T) {
 	if err := client.Kill(k, root); err != nil {
 		t.Fatal(err)
 	}
-	m, err := b.Recv()
-	if err != nil {
-		t.Fatalf("attached client should be notified before hangup, got %v", err)
-	}
-	if m.Type != protocol.TypeKilled || m.Root != root {
-		t.Fatalf("notification = %+v", m)
+	_ = b.SetDeadline(time.Now().Add(10 * time.Second))
+	for {
+		m, err := b.Recv()
+		if err != nil {
+			t.Fatalf("attached client should be notified before hangup, got %v", err)
+		}
+		if m.Type == protocol.TypeOutput {
+			continue // pane output queued before the kill is fine
+		}
+		if m.Type != protocol.TypeKilled || m.Root != root {
+			t.Fatalf("notification = %+v", m)
+		}
+		break
 	}
 	if s := sessionList(t, rt); len(s) != 0 {
 		t.Fatalf("sessions after kill = %+v", s)
@@ -155,13 +162,13 @@ func TestCheckpointSurvivesDaemonRestart(t *testing.T) {
 	rt := t.TempDir()
 	statePath := filepath.Join(t.TempDir(), "sessions.json")
 	done := start(t, rt, statePath)
-	root := "/proj/beta"
+	root := t.TempDir()
 
 	c, err := client.Dial(rt)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.Attach(c, root); err != nil {
+	if _, _, err := client.Attach(c, root, 80, 24); err != nil {
 		t.Fatal(err)
 	}
 	if err := client.Shutdown(c); err != nil {
@@ -190,7 +197,7 @@ func TestSpawnRaceLoserYieldsWithoutDisturbingWinner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.Attach(c, "/proj/gamma"); err != nil {
+	if _, _, err := client.Attach(c, t.TempDir(), 80, 24); err != nil {
 		t.Fatal(err)
 	}
 	defer c.Close()
@@ -259,10 +266,10 @@ func TestSecondAttachOnOneConnRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.Close()
-	if _, err := client.Attach(c, "/proj/one"); err != nil {
+	if _, _, err := client.Attach(c, t.TempDir(), 80, 24); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.Attach(c, "/proj/two"); err == nil || !strings.Contains(err.Error(), "already attached") {
+	if _, _, err := client.Attach(c, t.TempDir(), 80, 24); err == nil || !strings.Contains(err.Error(), "already attached") {
 		t.Fatalf("second attach err = %v", err)
 	}
 }
@@ -295,7 +302,7 @@ func TestProtocolMismatchRefusedWithoutKillingAnything(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer a.Close()
-	if _, err := client.Attach(a, "/proj/delta"); err != nil {
+	if _, _, err := client.Attach(a, t.TempDir(), 80, 24); err != nil {
 		t.Fatal(err)
 	}
 

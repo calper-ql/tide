@@ -27,18 +27,30 @@ const (
 	TypeError    = "error"    // daemon → client: request failed, see Err
 	TypeSessions = "sessions" // daemon → client: ls reply
 	TypeKilled   = "killed"   // daemon → attached clients: session ended
+
+	// Stream frames; they flow on an attached connection and carry no Seq.
+	TypeInput   = "input"   // client → daemon: keyboard bytes for the pane PTY
+	TypeResize  = "resize"  // client → daemon: the client terminal is Cols x Rows
+	TypeOutput  = "output"  // daemon → attached clients: raw pane output bytes
+	TypeExit    = "exit"    // daemon → attached clients: the pane shell exited
+	TypeDropped = "dropped" // daemon → one client: evicted for not keeping up, see Err
 )
 
 // Message is the single envelope for every frame; Type selects which fields
 // are meaningful.
 type Message struct {
 	Type            string        `json:"type"`
+	Seq             int64         `json:"seq,omitempty"` // request id, echoed in the reply
 	BinaryVersion   string        `json:"binary_version,omitempty"`
 	ProtocolVersion int           `json:"protocol_version,omitempty"`
 	Root            string        `json:"root,omitempty"`
 	Err             string        `json:"err,omitempty"`
 	Session         *SessionInfo  `json:"session,omitempty"`
 	Sessions        []SessionInfo `json:"sessions,omitempty"`
+	Data            []byte        `json:"data,omitempty"` // input/output bytes, attach snapshot
+	Cols            int           `json:"cols,omitempty"`
+	Rows            int           `json:"rows,omitempty"`
+	ExitStatus      int           `json:"exit_status,omitempty"`
 }
 
 // SessionInfo is the client-visible view of a session.

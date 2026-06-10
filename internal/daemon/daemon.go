@@ -12,8 +12,10 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/calper-ql/tide/internal/paths"
 	"github.com/calper-ql/tide/internal/protocol"
@@ -30,9 +32,11 @@ type Options struct {
 type daemon struct {
 	logf     *log.Logger
 	registry *session.Registry
+	socket   string
 
-	mu       sync.Mutex
-	attached map[string]map[*protocol.Conn]struct{} // root → live client conns
+	mu      sync.Mutex
+	panes   map[string]*pane // root → live pane
+	closing bool             // shutdownPanes started; no new panes
 
 	shutdown chan struct{}
 	once     sync.Once
@@ -125,7 +129,8 @@ func Run(opts Options) error {
 	d := &daemon{
 		logf:     logf,
 		registry: registry,
-		attached: map[string]map[*protocol.Conn]struct{}{},
+		socket:   sock,
+		panes:    map[string]*pane{},
 		shutdown: make(chan struct{}),
 	}
 	logf.Printf("daemon up: socket=%s sessions=%d", sock, registry.Len())
@@ -148,22 +153,73 @@ func Run(opts Options) error {
 		l.Close() // unblocks Accept
 	}()
 
+	failures := 0
 	for {
 		conn, err := l.Accept()
 		if err != nil {
 			select {
 			case <-d.shutdown:
+				d.shutdownPanes()
 				logf.Printf("daemon down: explicit shutdown, sessions checkpointed")
 				return nil
 			default:
-				return err
 			}
+			// Transient accept errors (EMFILE under fd pressure) must not
+			// take every session's shell down with them.
+			failures++
+			if failures > 100 {
+				d.shutdownPanes()
+				return fmt.Errorf("accept keeps failing: %w", err)
+			}
+			logf.Printf("accept error (%d/100): %v", failures, err)
+			time.Sleep(100 * time.Millisecond)
+			continue
 		}
+		failures = 0
 		go d.serve(protocol.NewConn(conn))
 	}
 }
 
 func (d *daemon) stop() { d.once.Do(func() { close(d.shutdown) }) }
+
+// saveCheckpoint binds pane checkpoints to the registry. A pane that is no
+// longer current — killed, or replaced after a kill+recreate — must not
+// write: its dying checkpoint would resurrect content the user explicitly
+// ended. Failures are logged, never fatal; the next debounce retries.
+func (d *daemon) saveCheckpoint(root, uuid string, cols, rows int, snapshot []byte, history [][]byte) {
+	d.mu.Lock()
+	p := d.panes[root]
+	current := p != nil && p.uuid == uuid
+	d.mu.Unlock()
+	if !current {
+		return
+	}
+	if err := d.registry.UpdatePane(root, uuid, cols, rows, snapshot, history); err != nil {
+		d.logf.Printf("checkpoint failed root=%s: %v", root, err)
+	}
+}
+
+// shutdownPanes checkpoints every pane and hangs up its shell. Restart's
+// warning ("sessions will be shut down") is about exactly this: processes
+// die, content survives to the checkpoint. The panes map stays intact while
+// the final checkpoints run (saveCheckpoint requires currency) and the
+// closing flag keeps racing attaches from spawning orphan shells.
+func (d *daemon) shutdownPanes() {
+	d.mu.Lock()
+	d.closing = true
+	panes := make([]*pane, 0, len(d.panes))
+	for _, p := range d.panes {
+		panes = append(panes, p)
+	}
+	d.mu.Unlock()
+	for _, p := range panes {
+		p.takeClients() // writers stop; conns die with the process
+		p.shutdown()
+	}
+	d.mu.Lock()
+	d.panes = map[string]*pane{}
+	d.mu.Unlock()
+}
 
 func (d *daemon) serve(c *protocol.Conn) {
 	defer c.Close()
@@ -179,11 +235,12 @@ func (d *daemon) serve(c *protocol.Conn) {
 	}
 
 	var attachedRoot string
+	var attachedPane *pane
 	defer func() {
 		// A vanished client — closed terminal included — is a detach,
 		// never a session end (prime rule).
-		if attachedRoot != "" {
-			d.detach(attachedRoot, c)
+		if attachedPane != nil {
+			attachedPane.removeClient(c)
 			d.logf.Printf("detach root=%s", attachedRoot)
 		}
 	}()
@@ -195,111 +252,151 @@ func (d *daemon) serve(c *protocol.Conn) {
 		}
 		switch m.Type {
 		case protocol.TypeAttach:
-			if m.Root == "" {
-				_ = c.Send(protocol.Message{Type: protocol.TypeError, Err: "attach requires a root"})
+			if err := validRoot(m.Root); err != nil {
+				_ = c.Send(protocol.Message{Type: protocol.TypeError, Seq: m.Seq, Err: err.Error()})
 				continue
 			}
-			if attachedRoot != "" {
-				_ = c.Send(protocol.Message{Type: protocol.TypeError, Err: "already attached to " + attachedRoot})
+			if attachedPane != nil {
+				_ = c.Send(protocol.Message{Type: protocol.TypeError, Seq: m.Seq, Err: "already attached to " + attachedRoot})
 				continue
 			}
-			s, created, clients, err := d.attachSession(m.Root, c)
+			cols, rows := m.Cols, m.Rows
+			if cols < 1 || rows < 1 {
+				cols, rows = 80, 24
+			}
+			p, clients, err := d.attachSession(c, m.Root, cols, rows, m.Seq)
 			if err != nil {
-				_ = c.Send(protocol.Message{Type: protocol.TypeError, Err: err.Error()})
+				_ = c.Send(protocol.Message{Type: protocol.TypeError, Seq: m.Seq, Err: err.Error()})
 				continue
 			}
-			attachedRoot = m.Root
-			d.logf.Printf("attach root=%s clients=%d created=%v", m.Root, clients, created)
-			_ = c.Send(protocol.Message{Type: protocol.TypeOK, Session: &protocol.SessionInfo{
-				Root: s.Root, CreatedAt: s.CreatedAt, Clients: clients,
-			}})
+			// The ok reply is already in the client's outbox (first frame,
+			// enqueued under the pane lock) — sending it here instead would
+			// let an output frame race ahead of it on the wire.
+			attachedRoot, attachedPane = m.Root, p
+			d.logf.Printf("attach root=%s clients=%d size=%dx%d", m.Root, clients, cols, rows)
+
+		case protocol.TypeInput:
+			if attachedPane != nil {
+				attachedPane.input(m.Data)
+			}
+
+		case protocol.TypeResize:
+			if attachedPane != nil {
+				attachedPane.resize(m.Cols, m.Rows)
+			}
 
 		case protocol.TypeLs:
-			_ = c.Send(protocol.Message{Type: protocol.TypeSessions, Sessions: d.list()})
+			_ = c.Send(protocol.Message{Type: protocol.TypeSessions, Seq: m.Seq, Sessions: d.list()})
 
 		case protocol.TypeKill:
-			if m.Root == "" {
-				_ = c.Send(protocol.Message{Type: protocol.TypeError, Err: "kill requires a root"})
+			if err := validRoot(m.Root); err != nil {
+				_ = c.Send(protocol.Message{Type: protocol.TypeError, Seq: m.Seq, Err: err.Error()})
 				continue
 			}
-			killed, conns, err := d.killSession(m.Root)
+			killed, p, err := d.killSession(m.Root)
 			if err != nil {
-				_ = c.Send(protocol.Message{Type: protocol.TypeError, Err: err.Error()})
+				_ = c.Send(protocol.Message{Type: protocol.TypeError, Seq: m.Seq, Err: err.Error()})
 				continue
 			}
 			if !killed {
-				_ = c.Send(protocol.Message{Type: protocol.TypeError, Err: "no session for " + m.Root})
+				_ = c.Send(protocol.Message{Type: protocol.TypeError, Seq: m.Seq, Err: "no session for " + m.Root})
 				continue
 			}
-			for conn := range conns {
-				if conn == c {
-					continue // the requester gets its ok below, not a hangup
+			if p != nil {
+				for _, conn := range p.takeClients() {
+					if conn == c {
+						continue // the requester gets its ok below, not a hangup
+					}
+					// Deadline-bounded: a non-reading client must not block
+					// the kill (and with it the shell teardown) forever.
+					_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+					_ = conn.Send(protocol.Message{Type: protocol.TypeKilled, Root: m.Root})
+					_ = conn.Close()
 				}
-				_ = conn.Send(protocol.Message{Type: protocol.TypeKilled, Root: m.Root})
-				_ = conn.Close()
+				p.shutdown()
 			}
 			if attachedRoot == m.Root {
-				attachedRoot = ""
+				attachedRoot, attachedPane = "", nil
 			}
 			d.logf.Printf("kill root=%s", m.Root)
-			_ = c.Send(protocol.Message{Type: protocol.TypeOK})
+			_ = c.Send(protocol.Message{Type: protocol.TypeOK, Seq: m.Seq})
 
 		case protocol.TypeShutdown:
-			_ = c.Send(protocol.Message{Type: protocol.TypeOK})
+			_ = c.Send(protocol.Message{Type: protocol.TypeOK, Seq: m.Seq})
 			d.logf.Printf("shutdown requested")
 			d.stop()
 			return
 
 		default:
-			_ = c.Send(protocol.Message{Type: protocol.TypeError, Err: "unknown message type " + m.Type})
+			_ = c.Send(protocol.Message{Type: protocol.TypeError, Seq: m.Seq, Err: "unknown message type " + m.Type})
 		}
 	}
 }
 
-// attachSession ensures the session and registers the client in one
-// critical section. Atomicity with killSession matters: split in two, a
-// conn could join a session mid-kill and sit attached to nothing, never
-// receiving TypeKilled. (registry's own mutex nests inside d.mu and is
-// never held across it.)
-func (d *daemon) attachSession(root string, c *protocol.Conn) (s session.Session, created bool, clients int, err error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	s, created, err = d.registry.Ensure(root)
-	if err != nil {
-		return session.Session{}, false, 0, err
+// validRoot guards the protocol boundary: session identities are absolute,
+// clean paths, never interpreted relative to the daemon's own cwd.
+func validRoot(root string) error {
+	if root == "" {
+		return errors.New("a root path is required")
 	}
-	set, ok := d.attached[root]
-	if !ok {
-		set = map[*protocol.Conn]struct{}{}
-		d.attached[root] = set
+	if !filepath.IsAbs(root) || root != filepath.Clean(root) {
+		return fmt.Errorf("root must be an absolute clean path, got %q", root)
 	}
-	set[c] = struct{}{}
-	return s, created, len(set), nil
+	return nil
 }
 
-// killSession removes the session and claims its attached conns in the
-// same critical section; the caller owns notifying and closing them.
-func (d *daemon) killSession(root string) (killed bool, conns map[*protocol.Conn]struct{}, err error) {
+// attachSession ensures the session and its pane, then registers the client
+// — one critical section, atomic with killSession, so a conn can never join
+// a session mid-kill. (registry's and pane's own mutexes nest inside d.mu
+// and are never held across it.) The attach reply enters the client's
+// outbox inside pane.attachClient.
+func (d *daemon) attachSession(conn *protocol.Conn, root string, cols, rows int, seq int64) (*pane, int, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.closing {
+		return nil, 0, errors.New("daemon is shutting down")
+	}
+	s, created, err := d.registry.Ensure(root)
+	if err != nil {
+		return nil, 0, err
+	}
+	p := d.panes[root]
+	if p == nil {
+		stored, _ := d.registry.Get(root)
+		p, err = newPane(stored, cols, rows, d.socket, d.logf, d.saveCheckpoint)
+		if err != nil {
+			if created {
+				// The session was created for this attach; do not leave a
+				// shell-less husk behind.
+				_, _ = d.registry.Kill(root)
+			}
+			return nil, 0, err
+		}
+		d.panes[root] = p
+	}
+	clients, err := p.attachClient(conn, cols, rows, d.socket, func(snapshot []byte, clients int) protocol.Message {
+		return protocol.Message{Type: protocol.TypeOK, Seq: seq, Data: snapshot, Session: &protocol.SessionInfo{
+			Root: s.Root, CreatedAt: s.CreatedAt, Clients: clients,
+		}}
+	})
+	if err != nil {
+		return nil, 0, err
+	}
+	return p, clients, nil
+}
+
+// killSession removes the session and claims its pane in the same critical
+// section; the caller owns notifying clients and stopping the shell.
+func (d *daemon) killSession(root string) (killed bool, p *pane, err error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	killed, err = d.registry.Kill(root)
 	if err != nil || !killed {
 		return killed, nil, err
 	}
-	conns = d.attached[root]
-	delete(d.attached, root)
-	return true, conns, nil
-}
-
-func (d *daemon) detach(root string, c *protocol.Conn) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if set, ok := d.attached[root]; ok {
-		delete(set, c)
-		if len(set) == 0 {
-			delete(d.attached, root)
-		}
-	}
+	p = d.panes[root]
+	delete(d.panes, root)
+	return true, p, nil
 }
 
 func (d *daemon) list() []protocol.SessionInfo {
@@ -308,8 +405,12 @@ func (d *daemon) list() []protocol.SessionInfo {
 	defer d.mu.Unlock()
 	out := make([]protocol.SessionInfo, 0, len(sessions))
 	for _, s := range sessions {
+		clients := 0
+		if p := d.panes[s.Root]; p != nil {
+			clients = p.clientCount()
+		}
 		out = append(out, protocol.SessionInfo{
-			Root: s.Root, CreatedAt: s.CreatedAt, Clients: len(d.attached[s.Root]),
+			Root: s.Root, CreatedAt: s.CreatedAt, Clients: clients,
 		})
 	}
 	return out
