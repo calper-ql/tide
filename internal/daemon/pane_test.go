@@ -51,7 +51,7 @@ func collectRender(t *testing.T, c *protocol.Conn, seed []byte, want string) str
 }
 
 func TestPaneEchoRoundtrip(t *testing.T) {
-	rt := t.TempDir()
+	rt := runtimeDir(t)
 	start(t, rt, filepath.Join(t.TempDir(), "sessions.json"))
 	root := t.TempDir()
 
@@ -68,7 +68,7 @@ func TestPaneEchoRoundtrip(t *testing.T) {
 // death, no goodbye), reattach from a new terminal — build output intact
 // (the head via wheel-scrollback, the daemon owns it now), mid-keystroke.
 func TestAcceptanceCrashSurvival(t *testing.T) {
-	rt := t.TempDir()
+	rt := runtimeDir(t)
 	start(t, rt, filepath.Join(t.TempDir(), "sessions.json"))
 	root := t.TempDir()
 
@@ -121,7 +121,7 @@ func TestAcceptanceCrashSurvival(t *testing.T) {
 }
 
 func TestShellExitNoticeAndClickRestarts(t *testing.T) {
-	rt := t.TempDir()
+	rt := runtimeDir(t)
 	start(t, rt, filepath.Join(t.TempDir(), "sessions.json"))
 	root := t.TempDir()
 
@@ -147,7 +147,7 @@ func TestShellExitNoticeAndClickRestarts(t *testing.T) {
 }
 
 func TestPaneContentSurvivesDaemonRestart(t *testing.T) {
-	rt := t.TempDir()
+	rt := runtimeDir(t)
 	statePath := filepath.Join(t.TempDir(), "sessions.json")
 	done := start(t, rt, statePath)
 	root := t.TempDir()
@@ -188,7 +188,7 @@ func TestPaneContentSurvivesDaemonRestart(t *testing.T) {
 }
 
 func TestResizePropagatesToShell(t *testing.T) {
-	rt := t.TempDir()
+	rt := runtimeDir(t)
 	start(t, rt, filepath.Join(t.TempDir(), "sessions.json"))
 	root := t.TempDir()
 
@@ -206,7 +206,7 @@ func TestResizePropagatesToShell(t *testing.T) {
 }
 
 func TestMultiClientSeesSameComposition(t *testing.T) {
-	rt := t.TempDir()
+	rt := runtimeDir(t)
 	start(t, rt, filepath.Join(t.TempDir(), "sessions.json"))
 	root := t.TempDir()
 
@@ -224,7 +224,7 @@ func TestMultiClientSeesSameComposition(t *testing.T) {
 }
 
 func TestSecondCtrlCInterruptsAfterCopy(t *testing.T) {
-	rt := t.TempDir()
+	rt := runtimeDir(t)
 	start(t, rt, filepath.Join(t.TempDir(), "sessions.json"))
 	root := t.TempDir()
 
@@ -260,7 +260,7 @@ func TestSecondCtrlCInterruptsAfterCopy(t *testing.T) {
 }
 
 func TestKillingLastSessionExitsDaemon(t *testing.T) {
-	rt := t.TempDir()
+	rt := runtimeDir(t)
 	statePath := filepath.Join(t.TempDir(), "sessions.json")
 	done := start(t, rt, statePath)
 	rootA, rootB := t.TempDir(), t.TempDir()
@@ -303,7 +303,7 @@ func TestKillingLastSessionExitsDaemon(t *testing.T) {
 // a fresh shell — forwarding clicks to it types garbage. The restore path
 // must reset input-affecting modes.
 func TestRestoredPaneDropsStaleInputModes(t *testing.T) {
-	rt := t.TempDir()
+	rt := runtimeDir(t)
 	statePath := filepath.Join(t.TempDir(), "sessions.json")
 	done := start(t, rt, statePath)
 	root := t.TempDir()

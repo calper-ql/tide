@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # cli.sh — build and test tide inside a pinned Docker environment.
 #
-#   ./cli.sh build            build bin/tide
+#   ./cli.sh build            build bin/tide for the host OS/arch
 #   ./cli.sh test [args]      go test -race (default ./...; args pass through)
 #   ./cli.sh check            gofmt + go vet
 #   ./cli.sh ci               check + build + test
@@ -14,6 +14,18 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 IMAGE="${TIDE_BUILD_IMAGE:-golang:1.26-bookworm}"
+
+# build targets the host platform so bin/tide runs where cli.sh ran; pure Go
+# cross-compiles inside the pinned (linux) container. test/check still run as
+# linux — cross-compiled tests can't execute there.
+case "$(uname -s)" in
+Darwin) HOST_GOOS=darwin ;;
+*) HOST_GOOS=linux ;;
+esac
+case "$(uname -m)" in
+arm64 | aarch64) HOST_GOARCH=arm64 ;;
+*) HOST_GOARCH=amd64 ;;
+esac
 
 run() {
   mkdir -p .cache/go-build bin
@@ -41,8 +53,8 @@ shift || true
 case "$cmd" in
 build)
   need_docker
-  run go build -o bin/tide ./cmd/tide
-  echo "built bin/tide"
+  run env GOOS="$HOST_GOOS" GOARCH="$HOST_GOARCH" go build -o bin/tide ./cmd/tide
+  echo "built bin/tide ($HOST_GOOS/$HOST_GOARCH)"
   ;;
 test)
   need_docker

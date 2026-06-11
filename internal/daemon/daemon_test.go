@@ -40,6 +40,11 @@ func (l *logBuf) String() string {
 // must shut it down themselves (a cleanup makes that best-effort).
 func start(t *testing.T, runtimeDir, statePath string) chan error {
 	t.Helper()
+	// Panes spawn $SHELL; pin it so tests exercise tide, not the
+	// developer's shell rc (an interactive zsh that stalls in ~/.zshrc
+	// never echoes the markers tests wait for). The pinned container has
+	// no SHELL and already falls back to /bin/sh — this matches it.
+	t.Setenv("SHELL", "/bin/sh")
 	lb := &logBuf{}
 	t.Cleanup(func() {
 		if t.Failed() {
@@ -79,6 +84,19 @@ func waitUp(t *testing.T, runtimeDir string) {
 	}
 }
 
+// runtimeDir returns a fresh dir for the daemon socket. Not t.TempDir():
+// that path embeds the test name, which can push the socket past the
+// 104-byte sun_path limit on macOS (bind fails with EINVAL).
+func runtimeDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "tide-rt-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return dir
+}
+
 func eventually(t *testing.T, what string, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
@@ -105,7 +123,7 @@ func sessionList(t *testing.T, runtimeDir string) []protocol.SessionInfo {
 }
 
 func TestSessionSurvivesClientDetachAndEndsOnlyByKill(t *testing.T) {
-	rt := t.TempDir()
+	rt := runtimeDir(t)
 	statePath := filepath.Join(t.TempDir(), "sessions.json")
 	start(t, rt, statePath)
 	root := t.TempDir()
@@ -192,7 +210,7 @@ func TestSessionSurvivesClientDetachAndEndsOnlyByKill(t *testing.T) {
 }
 
 func TestCheckpointSurvivesDaemonRestart(t *testing.T) {
-	rt := t.TempDir()
+	rt := runtimeDir(t)
 	statePath := filepath.Join(t.TempDir(), "sessions.json")
 	done := start(t, rt, statePath)
 	root := t.TempDir()
@@ -222,7 +240,7 @@ func TestCheckpointSurvivesDaemonRestart(t *testing.T) {
 }
 
 func TestSpawnRaceLoserYieldsWithoutDisturbingWinner(t *testing.T) {
-	rt := t.TempDir()
+	rt := runtimeDir(t)
 	statePath := filepath.Join(t.TempDir(), "sessions.json")
 	start(t, rt, statePath)
 
@@ -261,7 +279,7 @@ func TestStaleSocketFileIsCleared(t *testing.T) {
 	// Daemon death (e.g. SIGKILL) leaves the socket file behind; the next
 	// daemon must remove it and bind (spec: stale socket — remove, spawn,
 	// retry).
-	rt := t.TempDir()
+	rt := runtimeDir(t)
 	statePath := filepath.Join(t.TempDir(), "sessions.json")
 	if err := os.WriteFile(paths.SocketPath(rt), nil, 0o600); err != nil {
 		t.Fatal(err)
@@ -272,7 +290,7 @@ func TestStaleSocketFileIsCleared(t *testing.T) {
 func TestSIGTERMShutsDownCleanly(t *testing.T) {
 	// SIGTERM is the version-independent shutdown path `tide restart` uses
 	// against a protocol-mismatched daemon.
-	rt := t.TempDir()
+	rt := runtimeDir(t)
 	statePath := filepath.Join(t.TempDir(), "sessions.json")
 	done := start(t, rt, statePath)
 
@@ -290,7 +308,7 @@ func TestSIGTERMShutsDownCleanly(t *testing.T) {
 }
 
 func TestSecondAttachOnOneConnRefused(t *testing.T) {
-	rt := t.TempDir()
+	rt := runtimeDir(t)
 	statePath := filepath.Join(t.TempDir(), "sessions.json")
 	start(t, rt, statePath)
 
@@ -308,7 +326,7 @@ func TestSecondAttachOnOneConnRefused(t *testing.T) {
 }
 
 func TestCorruptStateQuarantinedAndLoggedDaemonStillServes(t *testing.T) {
-	rt := t.TempDir()
+	rt := runtimeDir(t)
 	stateDir := t.TempDir()
 	statePath := filepath.Join(stateDir, "sessions.json")
 	if err := os.WriteFile(statePath, []byte("not json"), 0o600); err != nil {
@@ -326,7 +344,7 @@ func TestCorruptStateQuarantinedAndLoggedDaemonStillServes(t *testing.T) {
 }
 
 func TestProtocolMismatchRefusedWithoutKillingAnything(t *testing.T) {
-	rt := t.TempDir()
+	rt := runtimeDir(t)
 	statePath := filepath.Join(t.TempDir(), "sessions.json")
 	start(t, rt, statePath)
 

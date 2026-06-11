@@ -81,6 +81,7 @@ func (s *sink) waitFor(t *testing.T, what string, cond func() bool) {
 // pane and one attached pipe client.
 func newTestWS(t *testing.T) (*ws, *protocol.Conn, *sink) {
 	t.Helper()
+	t.Setenv("SHELL", "/bin/sh") // hermetic panes; see start()
 	root := t.TempDir()
 	reg := session.NewRegistry(filepath.Join(t.TempDir(), "sessions.json"))
 	if _, _, err := reg.Ensure(root); err != nil {
