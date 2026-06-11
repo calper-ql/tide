@@ -73,14 +73,17 @@ type pendingPress struct {
 	moved      bool
 }
 
-// hoverState is the frame element under the pointer on terminals that
-// report bare motion (mode 1003). Corner hovers carry every border meeting
-// there — the highlight previews exactly what a corner drag or click
-// affects. Terminals without 1003 simply never set it.
+// hoverState is the element under the pointer on terminals that report
+// bare motion (mode 1003). Corner hovers carry every border meeting there
+// — the highlight previews exactly what a corner drag or click affects.
+// Terminals without 1003 simply never set it.
 type hoverState struct {
-	key    string        // identity; rendering happens only when it changes
-	strips []layout.Rect // 1-cell border/ring strips to overdraw
-	bars   map[string]bool
+	key      string        // identity; rendering happens only when it changes
+	strips   []layout.Rect // 1-cell border/ring strips to overdraw
+	bars     map[string]bool
+	barKind  hitKind // session-bar button under the pointer
+	barTab   int
+	menuItem int // overlay item under the pointer; -1 none
 }
 
 type ws struct {

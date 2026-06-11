@@ -417,9 +417,17 @@ func absInt(v int) int {
 // corner drag or click affects. Renders happen only when the hovered
 // REGION changes, so the 1003 motion stream stays cheap.
 func (w *ws) updateHoverLocked(x, y int) {
-	var h hoverState
+	h := hoverState{menuItem: -1}
 	hit := w.hitAtLocked(x, y)
 	switch hit.kind {
+	case hitMenuItem:
+		h.menuItem = hit.item
+		h.key = fmt.Sprintf("mi:%d", hit.item)
+	case hitOverlayBody:
+		h.key = "overlay"
+	case hitTabLabel, hitNewTab, hitDetach, hitSessionMenu:
+		h.barKind, h.barTab = hit.kind, hit.tab
+		h.key = fmt.Sprintf("bb:%d:%d", hit.kind, hit.tab)
 	case hitPaneBar, hitPaneMenu:
 		h.bars = map[string]bool{hit.pane: true}
 		h.key = "bar:" + hit.pane
