@@ -230,11 +230,17 @@ func (w *ws) routeMouseLocked(conn *protocol.Conn, ev input.Event) {
 		case input.MouseRelease:
 			p := w.pending
 			w.pending = nil
-			if !p.moved && p.pane != "" {
-				w.openLayoutMenuLocked(p.pane, ev.X, ev.Y)
+			if !p.moved && p.menu != nil {
+				p.menu(w, ev.X, ev.Y)
 			}
 		}
 		return
+	}
+
+	// Bare motion (no button, no gesture in flight): hover tracking for
+	// terminals that report it.
+	if ev.Mouse == input.MouseMotion && ev.Button == 0 {
+		w.updateHoverLocked(ev.X, ev.Y)
 	}
 
 	// An in-progress selection drag owns the mouse.
@@ -305,23 +311,44 @@ func (w *ws) routeMouseLocked(conn *protocol.Conn, ev input.Event) {
 			w.openPaneMenuLocked(hit.pane, ev.X, ev.Y)
 		case hitPaneBar:
 			w.focusPaneLocked(hit.pane)
-			p := &pendingPress{x: ev.X, y: ev.Y, pane: hit.pane, h: hit.border, hasH: hit.hasBorder}
+			p := &pendingPress{x: ev.X, y: ev.Y, h: hit.border, hasH: hit.hasBorder}
 			// A bar press next to a vertical border is a corner grab.
 			if vb, ok := w.cornerVBorderLocked(ev.X, ev.Y); ok {
 				p.v, p.hasV = vb, true
 			}
+			// Boundary menus per the ratified model: a divider bar offers
+			// its boundary's actions (corner: the union); a top-edge bar
+			// offers "above" at its container's level.
+			switch {
+			case p.hasH && p.hasV:
+				vb, hb := p.v, p.h
+				p.menu = func(w *ws, x, y int) { w.openCornerMenuLocked(vb, hb, x, y) }
+			case p.hasH:
+				hb := p.h
+				p.menu = func(w *ws, x, y int) { w.openHBoundaryMenuLocked(hb, x, y) }
+			default:
+				pane := hit.pane
+				p.menu = func(w *ws, x, y int) { w.openTopEdgeMenuLocked(pane, x, y) }
+			}
 			w.pending = p
 		case hitBorder:
-			// Shared vertical border: drags resize; a click's layout menu
-			// targets the left neighbor (ratified).
-			p := &pendingPress{x: ev.X, y: ev.Y, pane: w.borderLeftOwnerLocked(hit.border.Rect.X, ev.Y), v: hit.border, hasV: true}
+			p := &pendingPress{x: ev.X, y: ev.Y, v: hit.border, hasV: true}
 			// A border press next to a bar divider is a corner grab.
 			if hb, ok := w.cornerHBorderLocked(ev.X, ev.Y); ok {
 				p.h, p.hasH = hb, true
 			}
+			if p.hasH {
+				vb, hb := p.v, p.h
+				p.menu = func(w *ws, x, y int) { w.openCornerMenuLocked(vb, hb, x, y) }
+			} else {
+				vb := p.v
+				p.menu = func(w *ws, x, y int) { w.openVBoundaryMenuLocked(vb, x, y) }
+			}
 			w.pending = p
 		case hitFrameEdge:
-			w.pending = &pendingPress{x: ev.X, y: ev.Y, pane: w.edgeOwnerLocked(ev.X, ev.Y)}
+			left, right, bottom := ev.X <= 1, ev.X >= w.cols-2, ev.Y >= w.rows-2
+			w.pending = &pendingPress{x: ev.X, y: ev.Y,
+				menu: func(w *ws, x, y int) { w.openRingMenuLocked(left, right, bottom, x, y) }}
 		case hitPane:
 			w.panePressLocked(conn, hit.pane, ev)
 		}
@@ -385,27 +412,56 @@ func absInt(v int) int {
 	return v
 }
 
-// borderLeftOwnerLocked resolves a shared vertical border to the pane on
-// its left at the clicked row (ratified: shared edges belong to the
-// left/top neighbor).
-func (w *ws) borderLeftOwnerLocked(borderX, y int) string {
-	for id, r := range w.rects {
-		if r.X+r.W == borderX && y >= r.Y && y < r.Y+r.H {
-			return id
+// updateHoverLocked tracks the frame element under the pointer. Corner
+// zones include every border meeting there — the highlight previews what a
+// corner drag or click affects. Renders happen only when the hovered
+// REGION changes, so the 1003 motion stream stays cheap.
+func (w *ws) updateHoverLocked(x, y int) {
+	var h hoverState
+	hit := w.hitAtLocked(x, y)
+	switch hit.kind {
+	case hitPaneBar, hitPaneMenu:
+		h.bars = map[string]bool{hit.pane: true}
+		h.key = "bar:" + hit.pane
+		if vb, ok := w.cornerVBorderLocked(x, y); ok {
+			h.strips = append(h.strips, vb.Rect)
+			h.key += fmt.Sprintf("+v%d", vb.Rect.X)
+		}
+	case hitBorder:
+		h.strips = append(h.strips, hit.border.Rect)
+		h.key = fmt.Sprintf("vb:%d", hit.border.Rect.X)
+		if hb, ok := w.cornerHBorderLocked(x, y); ok {
+			// The horizontal divider is a pane's bar: highlight it as one.
+			if id := w.paneAtBarLocked(hb.Rect); id != "" {
+				h.bars = map[string]bool{id: true}
+			}
+			h.key += fmt.Sprintf("+h%d", hb.Rect.Y)
+		}
+	case hitFrameEdge:
+		left, right, bottom := x <= 1, x >= w.cols-2, y >= w.rows-2
+		if left {
+			h.strips = append(h.strips, layout.Rect{X: 0, Y: w.area.Y, W: 1, H: w.area.H})
+			h.key += "L"
+		}
+		if right {
+			h.strips = append(h.strips, layout.Rect{X: w.cols - 1, Y: w.area.Y, W: 1, H: w.area.H})
+			h.key += "R"
+		}
+		if bottom {
+			h.strips = append(h.strips, layout.Rect{X: 0, Y: w.rows - 1, W: w.cols, H: 1})
+			h.key += "B"
 		}
 	}
-	return ""
+	if h.key != w.hover.key {
+		w.hover = h
+		w.markAllDirtyLocked()
+	}
 }
 
-// edgeOwnerLocked resolves an outer-ring cell to its adjacent pane.
-func (w *ws) edgeOwnerLocked(x, y int) string {
+// paneAtBarLocked finds the pane whose bar occupies a divider rect.
+func (w *ws) paneAtBarLocked(bar layout.Rect) string {
 	for id, r := range w.rects {
-		switch {
-		case x == 0 && r.X == w.area.X && y >= r.Y && y < r.Y+r.H:
-			return id
-		case x == w.cols-1 && r.X+r.W == w.area.X+w.area.W && y >= r.Y && y < r.Y+r.H:
-			return id
-		case y == w.rows-1 && r.Y+r.H == w.area.Y+w.area.H && x >= r.X && x < r.X+r.W:
+		if r.X == bar.X && r.Y == bar.Y {
 			return id
 		}
 	}
@@ -743,6 +799,10 @@ func (w *ws) openPaneMenuLocked(paneID string, x, y int) {
 		items: []menuItem{
 			{label: "Copy", enabled: hasSel, run: func(w *ws, c *protocol.Conn) { w.copySelectionLocked(c) }},
 			{label: "Paste", enabled: len(w.clip) > 0, run: func(w *ws, c *protocol.Conn) { w.pasteLocked(c, append([]byte(nil), w.clip...)) }},
+			{label: "Split Right", enabled: true, run: func(w *ws, _ *protocol.Conn) { w.actionSplitLocked(paneID, layout.SplitRight) }},
+			{label: "Split Left", enabled: true, run: func(w *ws, _ *protocol.Conn) { w.actionSplitLocked(paneID, layout.SplitLeft) }},
+			{label: "Split Down", enabled: true, run: func(w *ws, _ *protocol.Conn) { w.actionSplitLocked(paneID, layout.SplitDown) }},
+			{label: "Split Up", enabled: true, run: func(w *ws, _ *protocol.Conn) { w.actionSplitLocked(paneID, layout.SplitUp) }},
 			{label: "Restart Shell", enabled: dead, run: func(w *ws, _ *protocol.Conn) {
 				if pp := w.panes[paneID]; pp != nil {
 					_ = pp.respawnIfDead(w.d.socket)
@@ -754,23 +814,138 @@ func (w *ws) openPaneMenuLocked(paneID string, x, y int) {
 	w.markAllDirtyLocked()
 }
 
-// openLayoutMenuLocked is the frame-click menu: layout adjustments,
-// targeting the owning pane by name (ratified: the menu names its target).
-func (w *ws) openLayoutMenuLocked(paneID string, x, y int) {
-	if w.panes[paneID] == nil {
+// actionSplitNodeLocked inserts a fresh pane beside an arbitrary layout
+// node — the boundary-menu executor. The node pointer was captured when
+// the menu opened; SplitNode revalidates it against the tree, so a layout
+// that changed underneath (another client) fails loudly instead of
+// corrupting.
+func (w *ws) actionSplitNodeLocked(tab int, target *layout.Node, d layout.Dir) {
+	id := newPaneID()
+	p, err := w.spawnPane(id, nil, max(w.area.W/2, layout.MinPaneW), max(w.area.H/2, layout.MinPaneH))
+	if err != nil {
+		w.flashStatusLocked("split failed: " + err.Error())
 		return
 	}
-	title := w.paneTitleLocked(paneID)
+	if err := w.lay.SplitNode(tab, target, d, id); err != nil {
+		go p.shutdown()
+		w.flashStatusLocked("split failed: " + err.Error())
+		return
+	}
+	w.panes[id] = p
+	w.clearSelectionLocked()
+	w.recomputeLocked()
+	w.checkpointLayoutLocked()
+	w.markAllDirtyLocked()
+}
+
+// splitItem builds one boundary-menu entry.
+func (w *ws) splitItem(label string, target *layout.Node, d layout.Dir) menuItem {
+	tab := w.lay.Active
+	return menuItem{label: label, enabled: true, run: func(w *ws, _ *protocol.Conn) {
+		w.actionSplitNodeLocked(tab, target, d)
+	}}
+}
+
+// openHBoundaryMenuLocked: a divider between stacked siblings. "Here"
+// inserts at the boundary; left/right place the new pane beside the WHOLE
+// container, full height (the ratified boundary semantics).
+func (w *ws) openHBoundaryMenuLocked(bd layout.Border, x, y int) {
+	if bd.Node == nil || bd.Index+1 >= len(bd.Node.Children) {
+		return
+	}
 	w.overlay = &overlay{
-		x: x, y: y, pane: paneID,
-		title: "Layout — " + title,
+		x: x, y: y,
+		title: "Divider",
 		items: []menuItem{
-			{label: "Split '" + title + "' Right", enabled: true, run: func(w *ws, _ *protocol.Conn) { w.actionSplitLocked(paneID, layout.SplitRight) }},
-			{label: "Split '" + title + "' Left", enabled: true, run: func(w *ws, _ *protocol.Conn) { w.actionSplitLocked(paneID, layout.SplitLeft) }},
-			{label: "Split '" + title + "' Down", enabled: true, run: func(w *ws, _ *protocol.Conn) { w.actionSplitLocked(paneID, layout.SplitDown) }},
-			{label: "Split '" + title + "' Up", enabled: true, run: func(w *ws, _ *protocol.Conn) { w.actionSplitLocked(paneID, layout.SplitUp) }},
+			w.splitItem("New pane here (between)", bd.Node.Children[bd.Index], layout.SplitDown),
+			w.splitItem("New pane left — full height", bd.Node, layout.SplitLeft),
+			w.splitItem("New pane right — full height", bd.Node, layout.SplitRight),
 		},
 	}
+	w.markAllDirtyLocked()
+}
+
+// openVBoundaryMenuLocked: a border between side-by-side siblings.
+func (w *ws) openVBoundaryMenuLocked(bd layout.Border, x, y int) {
+	if bd.Node == nil || bd.Index+1 >= len(bd.Node.Children) {
+		return
+	}
+	w.overlay = &overlay{
+		x: x, y: y,
+		title: "Border",
+		items: []menuItem{
+			w.splitItem("New pane here (between)", bd.Node.Children[bd.Index], layout.SplitRight),
+			w.splitItem("New pane above — full width", bd.Node, layout.SplitUp),
+			w.splitItem("New pane below — full width", bd.Node, layout.SplitDown),
+		},
+	}
+	w.markAllDirtyLocked()
+}
+
+// openCornerMenuLocked: the union — left/right act at the horizontal
+// divider's container, up/down at the vertical border's container, exactly
+// what the corner hover highlights.
+func (w *ws) openCornerMenuLocked(vb, hb layout.Border, x, y int) {
+	if vb.Node == nil || hb.Node == nil {
+		return
+	}
+	w.overlay = &overlay{
+		x: x, y: y,
+		title: "Corner",
+		items: []menuItem{
+			w.splitItem("New pane left — full height", hb.Node, layout.SplitLeft),
+			w.splitItem("New pane right — full height", hb.Node, layout.SplitRight),
+			w.splitItem("New pane above — full width", vb.Node, layout.SplitUp),
+			w.splitItem("New pane below — full width", vb.Node, layout.SplitDown),
+		},
+	}
+	w.markAllDirtyLocked()
+}
+
+// openTopEdgeMenuLocked: a bar that is not a divider is its container's
+// top edge — "above" spans that container's full width (climbing stacked
+// runs the pane leads).
+func (w *ws) openTopEdgeMenuLocked(paneID string, x, y int) {
+	tab := w.lay.ActiveTab()
+	if tab == nil {
+		return
+	}
+	node := tab.TopEdgeNode(paneID)
+	if node == nil {
+		return
+	}
+	w.overlay = &overlay{
+		x: x, y: y,
+		title: "Top edge",
+		items: []menuItem{
+			w.splitItem("New pane above — full width", node, layout.SplitUp),
+		},
+	}
+	w.markAllDirtyLocked()
+}
+
+// openRingMenuLocked: the outer ring is the root's boundary; corners of
+// the ring offer both their sides.
+func (w *ws) openRingMenuLocked(left, right, bottom bool, x, y int) {
+	tab := w.lay.ActiveTab()
+	if tab == nil || tab.Root == nil {
+		return
+	}
+	root := tab.Root
+	var items []menuItem
+	if left {
+		items = append(items, w.splitItem("New pane left — full height", root, layout.SplitLeft))
+	}
+	if right {
+		items = append(items, w.splitItem("New pane right — full height", root, layout.SplitRight))
+	}
+	if bottom {
+		items = append(items, w.splitItem("New pane below — full width", root, layout.SplitDown))
+	}
+	if len(items) == 0 {
+		return
+	}
+	w.overlay = &overlay{x: x, y: y, title: "Edge", items: items}
 	w.markAllDirtyLocked()
 }
 

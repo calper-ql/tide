@@ -63,13 +63,24 @@ type dragState struct {
 
 // pendingPress disambiguates frame gestures (ratified two-menu model):
 // press+motion becomes a border drag (when there is a border to drag),
-// press+release in place opens the layout menu for the owning pane.
+// press+release in place opens the boundary menu built for the pressed
+// element.
 type pendingPress struct {
 	x, y       int
-	pane       string
+	menu       func(w *ws, x, y int)
 	v, h       layout.Border
 	hasV, hasH bool
 	moved      bool
+}
+
+// hoverState is the frame element under the pointer on terminals that
+// report bare motion (mode 1003). Corner hovers carry every border meeting
+// there — the highlight previews exactly what a corner drag or click
+// affects. Terminals without 1003 simply never set it.
+type hoverState struct {
+	key    string        // identity; rendering happens only when it changes
+	strips []layout.Rect // 1-cell border/ring strips to overdraw
+	bars   map[string]bool
 }
 
 type ws struct {
@@ -91,6 +102,7 @@ type ws struct {
 	drag     *dragState
 	pending  *pendingPress // frame press awaiting drag-vs-click resolution
 	appGrab  string        // pane holding an app-forwarded mouse drag
+	hover    hoverState    // frame element under the pointer (1003 terminals)
 	overlay  *overlay
 	hits     []hitRegion
 	clip     []byte // internal clipboard (ratified clipboard model)
@@ -296,6 +308,7 @@ func (w *ws) recomputeLocked() {
 		return
 	}
 	w.rects, w.borders = tab.Compute(w.area)
+	w.hover = hoverState{} // geometry moved; stale highlights would lie
 	for id, r := range w.rects {
 		if p := w.panes[id]; p != nil {
 			c := contentRect(r)

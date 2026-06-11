@@ -81,6 +81,7 @@ const (
 	sgrDim     = "\x1b[0;2m"
 	sgrFrame   = "\x1b[0;2m"                 // unfocused pane frames
 	sgrFrameFg = "\x1b[0;1;38;5;6m"          // focused pane bar: bold cyan
+	sgrHover   = "\x1b[0;1;38;5;14m"         // hovered boundary: bright cyan, heavy strokes
 	sgrMenu    = "\x1b[0;48;5;236;38;5;252m" // popup body
 	sgrMenuDi  = "\x1b[0;48;5;236;38;5;243m" // disabled item
 )
@@ -131,6 +132,9 @@ func (w *ws) renderLocked() []byte {
 			if full || w.dirtyPanes[id] {
 				w.renderPaneContentLocked(&b, id, c)
 			}
+		}
+		if full {
+			w.renderHoverLocked(&b)
 		}
 		for _, bd := range w.borders {
 			if bd.Vertical {
@@ -294,9 +298,12 @@ func (w *ws) renderPaneBarLocked(b *bytes.Buffer, id string, r layout.Rect, focu
 		return
 	}
 	p := w.panes[id]
-	style := sgrFrame
+	style, stroke := sgrFrame, "─"
 	if focused {
 		style = sgrFrameFg
+	}
+	if w.hover.bars[id] {
+		style, stroke = sgrHover, "━" // the boundary under the pointer
 	}
 	// Flanking junctions live in the neighboring border/ring columns.
 	atTop := r.Y == w.area.Y
@@ -326,11 +333,11 @@ func (w *ws) renderPaneBarLocked(b *bytes.Buffer, id string, r layout.Rect, focu
 		title += " (exited)"
 	}
 	const menu = "[≡]"
-	maxTitle := r.W - 4 - runewidth.StringWidth(menu) // "─ " + title + " " + fill + menu + "─"
+	maxTitle := r.W - 4 - runewidth.StringWidth(menu) // stroke + " " + title + " " + fill + menu + stroke
 	title = runewidth.Truncate(title, max(maxTitle, 1), "…")
 	tw := runewidth.StringWidth(title)
 	fill := r.W - 4 - tw - runewidth.StringWidth(menu)
-	fmt.Fprintf(b, "─ %s %s%s─", title, strings.Repeat("─", max(fill, 0)), menu)
+	fmt.Fprintf(b, "%s %s %s%s%s", stroke, title, strings.Repeat(stroke, max(fill, 0)), menu, stroke)
 	b.WriteString(right + sgrReset)
 
 	bd, hasBorder := barBorder[[2]int{r.X, r.Y}]
@@ -338,6 +345,29 @@ func (w *ws) renderPaneBarLocked(b *bytes.Buffer, id string, r layout.Rect, focu
 		hitRegion{rect: layout.Rect{X: r.X, Y: r.Y, W: r.W, H: 1}, kind: hitPaneBar, pane: id, border: bd, hasBorder: hasBorder},
 		hitRegion{rect: layout.Rect{X: r.X + r.W - 4, Y: r.Y, W: 4, H: 1}, kind: hitPaneMenu, pane: id},
 	)
+}
+
+// renderHoverLocked overdraws the hovered boundary strips with heavy
+// bright strokes (bars highlight via their own style; this covers vertical
+// borders and ring segments). Corner hovers carry several strips — the
+// preview of what a corner gesture affects.
+func (w *ws) renderHoverLocked(b *bytes.Buffer) {
+	if len(w.hover.strips) == 0 {
+		return
+	}
+	b.WriteString(sgrHover)
+	for _, s := range w.hover.strips {
+		if s.W == 1 {
+			for y := 0; y < s.H; y++ {
+				cup(b, s.Y+y, s.X)
+				b.WriteString("┃")
+			}
+		} else {
+			cup(b, s.Y, s.X)
+			b.WriteString(strings.Repeat("━", s.W))
+		}
+	}
+	b.WriteString(sgrReset)
 }
 
 // renderPaneContentLocked draws one pane's viewport, applying the scroll

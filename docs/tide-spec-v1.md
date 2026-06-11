@@ -220,6 +220,20 @@ Capabilities ship as first-party standalone tools that attach to the session
   bar's project-name segment opens the session menu (New Tab, Detach,
   Kill Session…); '-' quick-detach and '+' stay. Focus is indicated by
   frame styling.
+- **Boundary semantics and hover** *(ruled 2026-06-11, refinement)*.
+  Frame elements are boundaries of their CONTAINER, not handles of a
+  neighboring pane: from the divider between stacked panes, "new pane
+  right" spans the whole stack's height; "new pane here" inserts at the
+  clicked boundary. Corners merge both meeting borders (left/right act at
+  the horizontal divider's container, up/down at the vertical border's);
+  corner drags resize both axes. A bar that is not a divider is its
+  container's top edge ("above", full width — climbing stacked runs the
+  pane leads); the outer ring is the root's boundary. Pane-level splits
+  (halve THIS pane) live in the `[≡]` pane menu. On terminals reporting
+  bare motion (mode 1003; most, but not stock macOS Terminal.app), the
+  boundary under the pointer highlights — corners light every border they
+  join, previewing what the gesture affects; elsewhere the chrome degrades
+  to no highlight, never to broken clicks.
 
 ## Open rulings
 

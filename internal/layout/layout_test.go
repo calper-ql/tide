@@ -1091,3 +1091,56 @@ func TestSplitLeftAndUpInsertBefore(t *testing.T) {
 	rects, borders := l.Tabs[0].Compute(Rect{X: 0, Y: 0, W: 90, H: 30})
 	assertTiles(t, Rect{X: 0, Y: 0, W: 90, H: 30}, rects, borders)
 }
+
+func TestSplitNodeWrapsContainerFullExtent(t *testing.T) {
+	// The user-ruled boundary case: a stacked container split right gets a
+	// full-height neighbor; a second one flattens into the same row.
+	l := New("a")
+	if err := l.Split("a", SplitDown, "b"); err != nil {
+		t.Fatal(err)
+	}
+	stack := l.Tabs[0].Root
+	if err := l.SplitNode(0, stack, SplitRight, "c"); err != nil {
+		t.Fatal(err)
+	}
+	root := l.Tabs[0].Root
+	if root.Dir != SplitRight || len(root.Children) != 2 {
+		t.Fatalf("root = %+v", root)
+	}
+	if root.Children[0].Dir != SplitDown || root.Children[1].Pane != "c" {
+		t.Fatalf("expected [stack, c]: %+v", root.Children)
+	}
+	rects, _ := l.Tabs[0].Compute(Rect{X: 0, Y: 0, W: 90, H: 30})
+	if rects["c"].H != 30 {
+		t.Fatalf("c height = %d, want full 30", rects["c"].H)
+	}
+	// Same-axis flatten: another right split of the stack joins the row.
+	if err := l.SplitNode(0, root.Children[0], SplitRight, "d"); err != nil {
+		t.Fatal(err)
+	}
+	if len(root.Children) != 3 || root.Children[1].Pane != "d" {
+		t.Fatalf("flatten failed: %+v", root.Children)
+	}
+	rects, borders := l.Tabs[0].Compute(Rect{X: 0, Y: 0, W: 90, H: 30})
+	assertTiles(t, Rect{X: 0, Y: 0, W: 90, H: 30}, rects, borders)
+}
+
+func TestTopEdgeNodeClimbsStacks(t *testing.T) {
+	l := New("a")
+	_ = l.Split("a", SplitDown, "b")  // stack [a, b]
+	_ = l.Split("b", SplitRight, "c") // stack [a, [b | c]]
+	tab := l.Tabs[0]
+	// a leads the stack: its top edge is the whole stack (the root).
+	if n := tab.TopEdgeNode("a"); n != tab.Root {
+		t.Fatalf("a's top edge should be the root stack, got %+v", n)
+	}
+	// b's bar is the interior divider's row but b itself is child 0 of
+	// nothing stacked — its top edge is just b.
+	if n := tab.TopEdgeNode("b"); n == nil || n.Pane != "b" {
+		t.Fatalf("b's top edge should be b, got %+v", n)
+	}
+	// c sits beside b: its segment of the top edge is its own.
+	if n := tab.TopEdgeNode("c"); n == nil || n.Pane != "c" {
+		t.Fatalf("c's top edge should be c, got %+v", n)
+	}
+}

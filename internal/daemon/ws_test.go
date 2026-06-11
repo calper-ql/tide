@@ -192,9 +192,9 @@ func TestContextMenuSplitCreatesPaneAndBorder(t *testing.T) {
 	// layout menu for the adjacent pane (ratified two-menu model).
 	w.handleInput(conn, press(0, 5))
 	w.handleInput(conn, release(0, 5))
-	s.waitFor(t, "layout menu", func() bool { return s.contains("Layout — ") && s.contains("Right") })
+	s.waitFor(t, "edge menu", func() bool { return s.contains("New pane left — full height") })
 
-	menuClick(t, w, conn, "Split '")
+	menuClick(t, w, conn, "New pane left")
 	s.waitFor(t, "two panes", func() bool {
 		w.mu.Lock()
 		defer w.mu.Unlock()
@@ -426,10 +426,18 @@ func TestPaneMenuButtonAndSessionMenu(t *testing.T) {
 	w.handleInput(conn, release(x, y))
 	s.waitFor(t, "pane menu", func() bool { return s.contains("Close Pane") })
 	withWS(w, func() {
+		// Pane-level splits live here now; session actions never do.
+		hasSplit := false
 		for _, it := range w.overlay.items {
-			if strings.HasPrefix(it.label, "Kill Session") || strings.HasPrefix(it.label, "Split") {
+			if strings.HasPrefix(it.label, "Kill Session") {
 				t.Fatalf("pane menu must not contain %q", it.label)
 			}
+			if strings.HasPrefix(it.label, "Split") {
+				hasSplit = true
+			}
+		}
+		if !hasSplit {
+			t.Fatal("pane menu must offer pane-level splits")
 		}
 	})
 	w.handleInput(conn, []byte{0x1b}) // Esc closes
@@ -497,7 +505,7 @@ func TestStackedSplitBarIsDividerAndDraggable(t *testing.T) {
 	})
 	w.handleInput(conn, press(clickX, clickY))
 	w.handleInput(conn, release(clickX, clickY))
-	s.waitFor(t, "layout menu from bar click", func() bool { return s.contains("Layout — ") })
+	s.waitFor(t, "boundary menu from bar click", func() bool { return s.contains("New pane") })
 }
 
 func TestCornerDragResizesBothAxes(t *testing.T) {
@@ -570,6 +578,156 @@ func TestCornerDragResizesBothAxes(t *testing.T) {
 		if !widthChanged || !heightChanged {
 			t.Fatalf("corner drag must resize both axes: width=%v height=%v\nbefore=%v\nafter=%v",
 				widthChanged, heightChanged, before, after)
+		}
+	})
+}
+
+// TestDividerSplitRightSpansFullHeight pins the ratified boundary
+// semantics: from the divider between two stacked panes, "new pane right"
+// sits beside the WHOLE stack at full height — not beside one neighbor.
+func TestDividerSplitRightSpansFullHeight(t *testing.T) {
+	w, conn, s := newTestWS(t)
+	s.waitFor(t, "first frame", func() bool { return s.contains("1:") })
+	withWS(w, func() { w.actionSplitLocked(w.lay.FocusedPane(), layout.SplitDown) })
+
+	var barX, barY int
+	s.waitFor(t, "divider bar in hitmap", func() bool {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		for _, h := range w.hits {
+			if h.kind == hitPaneBar && h.hasBorder {
+				barX, barY = h.rect.X+2, h.rect.Y
+				return true
+			}
+		}
+		return false
+	})
+	w.handleInput(conn, press(barX, barY))
+	w.handleInput(conn, release(barX, barY))
+	s.waitFor(t, "divider menu", func() bool { return s.contains("New pane right — full height") })
+	menuClick(t, w, conn, "New pane right")
+
+	s.waitFor(t, "three panes", func() bool {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		return w.lay.CountPanes() == 3
+	})
+	withWS(w, func() {
+		newPane := w.lay.FocusedPane()
+		r, ok := w.rects[newPane]
+		if !ok {
+			t.Fatal("new pane has no rect")
+		}
+		if r.H != w.area.H {
+			t.Fatalf("new pane height = %d, want full area height %d (beside the stack, not one pane)", r.H, w.area.H)
+		}
+		if r.Y != w.area.Y {
+			t.Fatalf("new pane top = %d, want area top %d", r.Y, w.area.Y)
+		}
+	})
+}
+
+// TestDividerInsertHereGoesBetween pins the along-axis boundary action.
+func TestDividerInsertHereGoesBetween(t *testing.T) {
+	w, conn, s := newTestWS(t)
+	s.waitFor(t, "first frame", func() bool { return s.contains("1:") })
+	var topPane string
+	withWS(w, func() {
+		topPane = w.lay.FocusedPane()
+		w.actionSplitLocked(topPane, layout.SplitDown)
+	})
+	var barX, barY int
+	s.waitFor(t, "divider bar in hitmap", func() bool {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		for _, h := range w.hits {
+			if h.kind == hitPaneBar && h.hasBorder {
+				barX, barY = h.rect.X+2, h.rect.Y
+				return true
+			}
+		}
+		return false
+	})
+	w.handleInput(conn, press(barX, barY))
+	w.handleInput(conn, release(barX, barY))
+	s.waitFor(t, "divider menu", func() bool { return s.contains("New pane here (between)") })
+	menuClick(t, w, conn, "New pane here")
+	s.waitFor(t, "three stacked panes", func() bool {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		return w.lay.CountPanes() == 3
+	})
+	withWS(w, func() {
+		// All three tile the full width: still one stack, new pane between.
+		root := w.lay.ActiveTab().Root
+		if root.Dir != layout.SplitDown || len(root.Children) != 3 {
+			t.Fatalf("expected a 3-run stack, got %+v", root)
+		}
+		if root.Children[1].Pane != w.lay.FocusedPane() {
+			t.Fatalf("new pane must sit at the boundary (middle), got order %+v", root.Children)
+		}
+	})
+}
+
+func TestHoverHighlightsBorderAndCorner(t *testing.T) {
+	w, conn, s := newTestWS(t)
+	s.waitFor(t, "first frame", func() bool { return s.contains("1:") })
+	withWS(w, func() {
+		a := w.lay.FocusedPane()
+		w.actionSplitLocked(a, layout.SplitRight)
+		w.actionSplitLocked(w.lay.FocusedPane(), layout.SplitDown)
+	})
+	var vbX, vbY, hbY int
+	s.waitFor(t, "borders in layout", func() bool {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		var v, h *layout.Border
+		for i := range w.borders {
+			if w.borders[i].Vertical {
+				v = &w.borders[i]
+			} else {
+				h = &w.borders[i]
+			}
+		}
+		if v == nil || h == nil {
+			return false
+		}
+		vbX, vbY, hbY = v.Rect.X, v.Rect.Y+2, h.Rect.Y
+		return true
+	})
+	s.waitFor(t, "hitmap rebuilt", func() bool {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		for _, h := range w.hits {
+			if h.kind == hitBorder {
+				return true
+			}
+		}
+		return false
+	})
+
+	// Bare motion over the border (no button): the strip lights up heavy.
+	w.handleInput(conn, []byte(fmt.Sprintf("\x1b[<35;%d;%dM", vbX+1, vbY+1)))
+	s.waitFor(t, "border hover", func() bool { return s.contains("┃") })
+	withWS(w, func() {
+		if len(w.hover.strips) != 1 {
+			t.Fatalf("border hover strips = %+v", w.hover)
+		}
+	})
+
+	// Motion to the corner: the bar joins the highlight (both axes shown).
+	w.handleInput(conn, []byte(fmt.Sprintf("\x1b[<35;%d;%dM", vbX+1, hbY+1)))
+	withWS(w, func() {
+		if len(w.hover.strips) != 1 || len(w.hover.bars) != 1 {
+			t.Fatalf("corner hover must carry border AND bar: %+v", w.hover)
+		}
+	})
+
+	// Motion into content clears it.
+	w.handleInput(conn, []byte("\x1b[<35;5;5M"))
+	withWS(w, func() {
+		if w.hover.key != "" {
+			t.Fatalf("content hover must clear: %+v", w.hover)
 		}
 	})
 }

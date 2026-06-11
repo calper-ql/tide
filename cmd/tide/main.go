@@ -128,12 +128,15 @@ func resolveRoot(target string, here bool) (root string, foundRepo bool, err err
 // keyboard protocol pushed for chord disambiguation (Ctrl+Shift+E) —
 // terminals without it ignore the push and the daemon's decoder handles
 // the legacy encoding.
-const enterSequences = "\x1b[?1049h\x1b[?1002h\x1b[?1006h\x1b[?2004h\x1b[?1004h\x1b[>1u\x1b[2J"
+// 1002 (drag tracking) then 1003 (any-motion, for hover highlights):
+// terminals without 1003 keep 1002 and simply send no hover events —
+// the chrome degrades to no highlight, never to broken clicks.
+const enterSequences = "\x1b[?1049h\x1b[?1002h\x1b[?1003h\x1b[?1006h\x1b[?2004h\x1b[?1004h\x1b[>1u\x1b[2J"
 
 // resetSequences undo everything enterSequences set (in reverse: kitty
 // pop first, alt-screen leave last so the user's screen comes back clean)
 // plus anything the composed render stream may have left (SGR, cursor).
-const resetSequences = "\x1b[<u\x1b[?1004l\x1b[?2004l\x1b[?1006l\x1b[?1002l" +
+const resetSequences = "\x1b[<u\x1b[?1004l\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[?1002l" +
 	"\x1b[0m\x1b[?25h\x1b[?1049l"
 
 func attach(rt, target string, here bool) error {
