@@ -226,10 +226,12 @@ func (w *ws) renderBarLocked(b *bytes.Buffer) {
 	detach := " ─ detach "
 	dw := runewidth.StringWidth(detach)
 	if status != "" {
-		sw := runewidth.StringWidth(status)
-		x := w.cols - dw - sw - 2
-		if x > col {
-			cup(b, 0, x)
+		// Truncate to the room between the tabs and the detach button: a
+		// shortened "copied 17 c…" still confirms the action; dropping the
+		// flash entirely reads as the copy having failed.
+		if avail := w.cols - dw - col - 3; avail >= 8 {
+			status = runewidth.Truncate(status, avail, "…")
+			cup(b, 0, w.cols-dw-runewidth.StringWidth(status)-2)
 			b.WriteString(thBar + status)
 		}
 	}
