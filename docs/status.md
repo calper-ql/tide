@@ -1,7 +1,7 @@
 # tide — current state
 
 *Living document; update at the end of each increment.*
-*Last updated 2026-06-11 (HEAD `8e52bca`). Product contract: [tide-spec-v1.md](tide-spec-v1.md).*
+*Last updated 2026-06-11 (HEAD `f657919`). Product contract: [tide-spec-v1.md](tide-spec-v1.md).*
 
 ## Where we are
 
@@ -58,18 +58,25 @@ shells get a confirm overlay. Ctrl+Shift+E detaches (kitty keyboard
 protocol; the bar's '-' button covers every terminal). Everything else is
 re-encoded per the destination pane's own terminal modes and forwarded.
 
-**Mouse-first, discoverable (pane frames + two menus, ruled 2026-06-11).**
-Every pane is framed from the start; its top border is a bar — title left,
-[≡] pane-menu button right (Copy/Paste/Restart Shell/Close Pane), focused
-pane highlighted. The lower pane's bar is the stacked divider (shared
-edges render once). Frame gestures: press+drag resizes, press+release in
-place opens the layout menu (Split Right/Down, named target; shared edges
-belong to the left/top neighbor). The session bar's project segment (▾)
-opens the session menu (New Tab/Detach/Kill Session…); '+' and '-' stay.
-Nothing requires right-click (macOS Terminal.app never forwards it), but
-it remains a pane-menu accelerator where terminals do. Wheel scrolls
-daemon-side scrollback; apps that request mouse reporting get translated
-events with press-grab drag semantics; Shift bypasses to tide.
+**Mouse-first, discoverable (pane frames + boundary menus, ruled
+2026-06-11).** Every pane is framed from the start; its top border is a
+bar — title left, [≡] pane-menu button right (Copy/Paste/pane-level
+Splits/Restart Shell/Close Pane), focused pane highlighted. The lower
+pane's bar IS the stacked divider (shared edges render once). Frame
+gestures: press+drag resizes (corners grab both axes), press+release in
+place opens the boundary menu — every border offers all four directions:
+cross-axis at the container level (full extent beside the whole
+stack/row), along-axis inserting at the boundary and naming which
+neighbor donates the space. Non-divider bars are their container's top
+edge; the outer ring is the root's boundary. On terminals reporting bare
+motion (1003; not stock macOS Terminal.app), the boundary under the
+pointer highlights in heavy strokes — corners light every border they
+join. The session bar's project segment (▾) opens the session menu (New
+Tab/Detach/Kill Session…); '+' and '-' stay. Nothing requires
+right-click (macOS Terminal.app never forwards it), but it remains a
+pane-menu accelerator where terminals do. Wheel scrolls daemon-side
+scrollback; apps that request mouse reporting get translated events with
+press-grab drag semantics; Shift bypasses to tide.
 
 **Sessions and persistence.** Identity = canonical project root; layout
 (tabs, splits, ratios, focus) persists in sessions.json on every
@@ -77,8 +84,10 @@ structural change and at teardown; pane content checkpoints debounced into
 per-pane files (stale-pane and killed-session writes rejected; strays
 swept at startup; corrupt state quarantined, malformed layouts fall back
 fresh with a warning). Daemon restart restores tabs, splits, focus,
-scrollback, and spawns fresh shells with a notice. The daemon exits with
-its last session (ruled) and respawns on demand.
+scrollback, and spawns fresh shells with a notice — input-affecting modes
+(mouse reporting, bracketed paste, app cursor) reset on restore, since
+the fresh shell never asked for the old app's modes. The daemon exits
+with its last session (ruled) and respawns on demand.
 
 **Pane fidelity.** The VT answers DSR/CPR/DA queries itself, tracks
 bracketed paste and mouse modes, models wide glyphs, survives split escape
