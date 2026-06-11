@@ -72,3 +72,15 @@ func (t *Term) WithLock(f func(*State)) {
 	defer t.State.unlock()
 	f(t.State)
 }
+
+// DrainClips returns any clipboard events queued by OSC 52 sequences
+// during the most recent Write(s), clearing the queue. Called by the pane
+// after each Write so clipboard requests from inner programs (e.g.
+// bubbletea's tea.SetClipboard) reach the client's native clipboard tool.
+func (t *Term) DrainClips() []ClipEvent {
+	t.State.lock()
+	defer t.State.unlock()
+	clips := t.State.pendingClips
+	t.State.pendingClips = nil
+	return clips
+}

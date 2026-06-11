@@ -4,6 +4,7 @@
 package vt
 
 import (
+	"encoding/base64"
 	"fmt"
 	"math"
 	"regexp"
@@ -28,7 +29,7 @@ func (s *strEscape) reset() {
 
 func (s *strEscape) put(c rune) {
 	// TODO: improve allocs with an array backed slice; bench first
-	if len(s.buf) < 256 {
+	if len(s.buf) < maxInflight {
 		s.buf = append(s.buf, c)
 	}
 	// Going by st, it is better to remain silent when the STR sequence is not
@@ -136,6 +137,16 @@ func (t *State) handleSTR() {
 			} else {
 				// TODO: redraw
 			}
+		case 52: // clipboard write from inner program
+			target := s.argString(1, "c")
+			if target != "c" && target != "p" {
+				break // ignore secondary/cut-buffer targets
+			}
+			data, err := base64.StdEncoding.DecodeString(s.argString(2, ""))
+			if err != nil || len(data) == 0 {
+				break
+			}
+			t.pendingClips = append(t.pendingClips, ClipEvent{Target: target, Text: string(data)})
 		default:
 			t.logf("unknown OSC command %d\n", d)
 			// TODO: s.dump()

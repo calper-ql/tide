@@ -122,6 +122,17 @@ type State struct {
 	seq         []byte
 	seqOverflow bool
 	groundPC    uintptr
+
+	// tide: clipboard events emitted by inner programs via OSC 52, drained
+	// by Term.DrainClips after each Write so the pane can forward them to
+	// clients without holding the State lock.
+	pendingClips []ClipEvent
+}
+
+// ClipEvent holds one clipboard write request from an OSC 52 sequence.
+type ClipEvent struct {
+	Target string // "c" (clipboard) or "p" (primary)
+	Text   string
 }
 
 // tide: bound on in-flight sequence capture; a pathological never-ending

@@ -35,11 +35,13 @@ const (
 // paneHooks are the pane's callbacks into its workspace. dirty fires after
 // any visible change; exited fires once per shell death (the exit notice is
 // already in the grid by then). save persists a content checkpoint and is
-// expected to reject stale panes.
+// expected to reject stale panes. clip fires when an inner program writes
+// to the clipboard via OSC 52 (target is "c" or "p").
 type paneHooks struct {
 	dirty  func()
 	exited func()
 	save   func(paneID string, cols, rows int, snapshot []byte, history [][]byte)
+	clip   func(target, text string)
 }
 
 type pane struct {
@@ -257,7 +259,13 @@ func (p *pane) readLoop(ptmx *os.File) {
 		if n > 0 {
 			p.mu.Lock()
 			p.term.Write(buf[:n])
+			clips := p.term.DrainClips()
 			p.mu.Unlock()
+			for _, ev := range clips {
+				if p.hook.clip != nil {
+					p.hook.clip(ev.Target, ev.Text)
+				}
+			}
 			p.hook.dirty()
 			p.scheduleCheckpoint()
 		}

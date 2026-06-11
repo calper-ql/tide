@@ -233,6 +233,7 @@ func (w *ws) spawnPane(id string, stored *session.PaneContent, cols, rows int) (
 		save: func(paneID string, cols, rows int, snapshot []byte, history [][]byte) {
 			w.savePane(paneID, cols, rows, snapshot, history)
 		},
+		clip: func(target, text string) { w.clipFromPane(target, text) },
 	}
 	return newPane(id, w.root, stored, cols, rows, w.d.socket, w.logf, hooks)
 }
@@ -391,6 +392,24 @@ func (w *ws) broadcastLocked(m protocol.Message) {
 	for conn := range w.clients {
 		w.sendToLocked(conn, m)
 	}
+}
+
+// clipFromPane forwards an OSC 52 clipboard write from an inner program to
+// all attached clients: OSC 52 on the render stream (for SSH terminals) and
+// a TypeCopy frame (for the client's native clipboard tool).
+func (w *ws) clipFromPane(target, text string) {
+	if len(target) == 0 {
+		return
+	}
+	protoTarget := protocol.CopyClipboard
+	if target == "p" {
+		protoTarget = protocol.CopyPrimary
+	}
+	w.mu.Lock()
+	w.clip = []byte(text)
+	w.broadcastLocked(protocol.Message{Type: protocol.TypeRender, Data: osc52(target[0], text)})
+	w.broadcastLocked(protocol.Message{Type: protocol.TypeCopy, Target: protoTarget, Data: []byte(text)})
+	w.mu.Unlock()
 }
 
 // takeClients hands every attached conn to the caller (kill sweep) and
