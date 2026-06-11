@@ -21,9 +21,10 @@ import (
 // sink drains one client's frames so outbox writers never stall, and
 // accumulates everything for content assertions.
 type sink struct {
-	mu    sync.Mutex
-	data  bytes.Buffer
-	types []string
+	mu     sync.Mutex
+	data   bytes.Buffer
+	types  []string
+	copies []protocol.Message
 }
 
 func startSink(conn *protocol.Conn) *sink {
@@ -36,11 +37,25 @@ func startSink(conn *protocol.Conn) *sink {
 			}
 			s.mu.Lock()
 			s.types = append(s.types, m.Type)
+			if m.Type == protocol.TypeCopy {
+				s.copies = append(s.copies, m)
+			}
 			s.data.Write(m.Data)
 			s.mu.Unlock()
 		}
 	}()
 	return s
+}
+
+func (s *sink) sawCopy(target, text string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, m := range s.copies {
+		if m.Target == target && string(m.Data) == text {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *sink) contains(sub string) bool {
@@ -248,6 +263,9 @@ func TestSelectionCtrlCCopiesThenSecondCtrlCReachesShell(t *testing.T) {
 	// Ctrl+C with a selection: copy, never SIGINT (ratified ruling).
 	w.handleInput(conn, []byte{0x03})
 	s.waitFor(t, "OSC 52 clipboard write", func() bool { return s.contains("\x1b]52;c;") })
+	s.waitFor(t, "native clipboard copy frame", func() bool {
+		return s.sawCopy(protocol.CopyClipboard, "SELECT-ME-TEXT")
+	})
 	withWS(w, func() {
 		if w.sel.exists {
 			t.Fatal("selection must clear on copy (second Ctrl+C interrupts)")
@@ -409,6 +427,16 @@ func TestMouseDragSelectionFeedsPrimary(t *testing.T) {
 	w.handleInput(conn, motion(10, 2))
 	w.handleInput(conn, release(10, 2))
 	s.waitFor(t, "primary selection write", func() bool { return s.contains("\x1b]52;p;") })
+	s.waitFor(t, "native primary copy frame", func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		for _, m := range s.copies {
+			if m.Target == protocol.CopyPrimary && len(m.Data) > 0 {
+				return true
+			}
+		}
+		return false
+	})
 	withWS(w, func() {
 		if !w.sel.exists {
 			t.Fatal("drag must leave a visible selection")

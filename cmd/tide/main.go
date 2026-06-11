@@ -245,6 +245,10 @@ func attach(rt, target string, here bool) error {
 			switch m.Type {
 			case protocol.TypeRender:
 				_, _ = os.Stdout.Write(m.Data)
+			case protocol.TypeCopy:
+				// Off the render goroutine: a wedged clipboard tool must
+				// not stall frame delivery.
+				go writeNativeClipboard(m.Target, m.Data)
 			case protocol.TypeDetached:
 				done <- result{reason: "detached — session keeps running; run 'tide' here to reattach"}
 				return

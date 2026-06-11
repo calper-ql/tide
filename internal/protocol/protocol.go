@@ -34,6 +34,15 @@ const (
 	TypeRender   = "render"   // daemon → attached clients: composed screen bytes to write verbatim
 	TypeDetached = "detached" // daemon → one client: detached via UI ('-' button, Ctrl+Shift+E)
 	TypeDropped  = "dropped"  // daemon → one client: evicted for not keeping up, see Err
+	TypeCopy     = "copy"     // daemon → one client: copied text (Data) for the native clipboard, see Target
+)
+
+// Copy targets: which system selection a TypeCopy frame feeds. They mirror
+// the OSC 52 targets, which remain on the render stream for terminals that
+// honor them; TypeCopy exists because many (Terminal.app, older VTE) don't.
+const (
+	CopyClipboard = "clipboard"
+	CopyPrimary   = "primary"
 )
 
 // Message is the single envelope for every frame; Type selects which fields
@@ -47,7 +56,8 @@ type Message struct {
 	Err             string        `json:"err,omitempty"`
 	Session         *SessionInfo  `json:"session,omitempty"`
 	Sessions        []SessionInfo `json:"sessions,omitempty"`
-	Data            []byte        `json:"data,omitempty"` // input/output bytes, attach snapshot
+	Data            []byte        `json:"data,omitempty"`   // input/output bytes, attach snapshot, copied text
+	Target          string        `json:"target,omitempty"` // copy: CopyClipboard or CopyPrimary
 	Cols            int           `json:"cols,omitempty"`
 	Rows            int           `json:"rows,omitempty"`
 	ExitStatus      int           `json:"exit_status,omitempty"`

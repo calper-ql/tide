@@ -198,11 +198,19 @@ Capabilities ship as first-party standalone tools that attach to the session
   last session ends the daemon process (tmux behavior, minimal footprint);
   on-demand spawn makes the next `tide` self-healing.
 - **Clipboard model** *(ruled 2026-06-10, implementation consequence of the
-  Ctrl+C ruling)*. Copy writes both a daemon-side internal clipboard and the
-  client's system clipboard via OSC 52; mouse selection additionally feeds
-  PRIMARY (OSC 52 `p`) on Linux. Ctrl+V pastes the internal clipboard
+  Ctrl+C ruling; amended 2026-06-11)*. Copy writes both a daemon-side
+  internal clipboard and the client's system clipboard; mouse selection
+  additionally feeds PRIMARY on Linux. Ctrl+V pastes the internal clipboard
   (portable without OSC 52 read permission); terminal-native paste arrives
-  as bracketed input and passes through the same guards.
+  as bracketed input and passes through the same guards. *Amendment*: the
+  system clipboard is fed two ways, because OSC 52 alone proved
+  insufficient — Terminal.app discards it entirely and VTE gained it late.
+  The daemon emits OSC 52 on the render stream (covers SSH attaches in
+  capable terminals) **and** a `copy` protocol frame the client pipes into
+  the platform tool when installed: `pbcopy` on macOS; `wl-copy`,
+  `xclip`, or `xsel` on Linux (Wayland tool first when `WAYLAND_DISPLAY`
+  is set). No tool found degrades to OSC 52 only. The client stays glass
+  on the render path — `copy` is a typed frame, not output parsing.
 
 - **Pane frames and the two-menu model** *(ruled 2026-06-11)*. Supersedes
   right-click-only pane chrome: macOS Terminal.app never forwards right

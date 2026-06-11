@@ -9,6 +9,7 @@ const (
 	// Protocol is the wire-protocol version. Clients and daemons attach
 	// only on an exact match; a mismatch prompts `tide restart`, never an
 	// implicit kill. v2: composed render frames replaced the raw pane
-	// output stream when chrome/layout landed.
-	Protocol = 2
+	// output stream when chrome/layout landed. v3: copy frames carry
+	// selection text to the client's native clipboard tool.
+	Protocol = 3
 )

@@ -51,7 +51,9 @@ the router consults — chrome geometry is never guessed.
 **The keymap (ratified rulings, implemented).** Selection-aware Ctrl+C:
 drag selections (content-coordinate, transient, cleared by any keystroke
 or focus change) copy to the internal clipboard + the client's clipboard
-via OSC 52, with a bar flash; no selection means 0x03 reaches the shell.
+(OSC 52 on the render stream, plus a typed copy frame the client pipes
+into pbcopy/wl-copy/xclip/xsel — OSC 52 alone dies in Terminal.app), with
+a bar flash; no selection means 0x03 reaches the shell.
 Mouse selection feeds PRIMARY on release. Ctrl+V pastes through guards —
 bracketed-paste panes get wrapped pastes, multi-line pastes into bare
 shells get a confirm overlay. Ctrl+Shift+E detaches (kitty keyboard

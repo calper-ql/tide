@@ -262,6 +262,7 @@ func (w *ws) routeMouseLocked(conn *protocol.Conn, ev input.Event) {
 				// CLIPBOARD only on explicit copy.
 				if text := w.selectionTextLocked(); text != "" {
 					w.sendToLocked(conn, protocol.Message{Type: protocol.TypeRender, Data: osc52('p', text)})
+					w.sendToLocked(conn, protocol.Message{Type: protocol.TypeCopy, Target: protocol.CopyPrimary, Data: []byte(text)})
 				}
 			}
 			w.dirtyPanes[w.sel.pane] = true
@@ -639,9 +640,12 @@ func (w *ws) selectionTextLocked() string {
 }
 
 // copySelectionLocked implements the copy half of the Ctrl+C ruling: the
-// internal clipboard and the requesting client's system clipboard (OSC 52)
-// both get the text, the selection clears (second Ctrl+C interrupts), and
-// the bar confirms it happened (discoverability).
+// internal clipboard and the requesting client's system clipboard both get
+// the text, the selection clears (second Ctrl+C interrupts), and the bar
+// confirms it happened (discoverability). The system clipboard is fed two
+// ways: OSC 52 on the render stream (works over SSH where the terminal
+// honors it) and a copy frame the client pipes into the platform tool
+// (works in terminals that discard OSC 52, e.g. Terminal.app).
 func (w *ws) copySelectionLocked(conn *protocol.Conn) {
 	text := w.selectionTextLocked()
 	if text == "" {
@@ -650,6 +654,7 @@ func (w *ws) copySelectionLocked(conn *protocol.Conn) {
 	}
 	w.clip = []byte(text)
 	w.sendToLocked(conn, protocol.Message{Type: protocol.TypeRender, Data: osc52('c', text)})
+	w.sendToLocked(conn, protocol.Message{Type: protocol.TypeCopy, Target: protocol.CopyClipboard, Data: []byte(text)})
 	w.clearSelectionLocked()
 	w.flashStatusLocked(fmt.Sprintf("copied %d chars — Ctrl+C again reaches the shell", len(text)))
 }
