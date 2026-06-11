@@ -650,8 +650,8 @@ func TestDividerInsertHereGoesBetween(t *testing.T) {
 	})
 	w.handleInput(conn, press(barX, barY))
 	w.handleInput(conn, release(barX, barY))
-	s.waitFor(t, "divider menu", func() bool { return s.contains("New pane here (between)") })
-	menuClick(t, w, conn, "New pane here")
+	s.waitFor(t, "divider menu", func() bool { return s.contains("New pane down — from the pane below") })
+	menuClick(t, w, conn, "New pane down")
 	s.waitFor(t, "three stacked panes", func() bool {
 		w.mu.Lock()
 		defer w.mu.Unlock()

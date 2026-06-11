@@ -846,9 +846,11 @@ func (w *ws) splitItem(label string, target *layout.Node, d layout.Dir) menuItem
 	}}
 }
 
-// openHBoundaryMenuLocked: a divider between stacked siblings. "Here"
-// inserts at the boundary; left/right place the new pane beside the WHOLE
-// container, full height (the ratified boundary semantics).
+// openHBoundaryMenuLocked: a divider between stacked siblings. All four
+// directions are available from any border (ruled): the cross-axis pair
+// acts at the CONTAINER level — full height beside the whole stack — and
+// the along-axis pair inserts at the clicked boundary, taking space from
+// the named neighbor.
 func (w *ws) openHBoundaryMenuLocked(bd layout.Border, x, y int) {
 	if bd.Node == nil || bd.Index+1 >= len(bd.Node.Children) {
 		return
@@ -857,15 +859,17 @@ func (w *ws) openHBoundaryMenuLocked(bd layout.Border, x, y int) {
 		x: x, y: y,
 		title: "Divider",
 		items: []menuItem{
-			w.splitItem("New pane here (between)", bd.Node.Children[bd.Index], layout.SplitDown),
 			w.splitItem("New pane left — full height", bd.Node, layout.SplitLeft),
 			w.splitItem("New pane right — full height", bd.Node, layout.SplitRight),
+			w.splitItem("New pane up — from the pane above", bd.Node.Children[bd.Index], layout.SplitDown),
+			w.splitItem("New pane down — from the pane below", bd.Node.Children[bd.Index+1], layout.SplitUp),
 		},
 	}
 	w.markAllDirtyLocked()
 }
 
-// openVBoundaryMenuLocked: a border between side-by-side siblings.
+// openVBoundaryMenuLocked: a border between side-by-side siblings —
+// mirror of the divider menu.
 func (w *ws) openVBoundaryMenuLocked(bd layout.Border, x, y int) {
 	if bd.Node == nil || bd.Index+1 >= len(bd.Node.Children) {
 		return
@@ -874,9 +878,10 @@ func (w *ws) openVBoundaryMenuLocked(bd layout.Border, x, y int) {
 		x: x, y: y,
 		title: "Border",
 		items: []menuItem{
-			w.splitItem("New pane here (between)", bd.Node.Children[bd.Index], layout.SplitRight),
-			w.splitItem("New pane above — full width", bd.Node, layout.SplitUp),
-			w.splitItem("New pane below — full width", bd.Node, layout.SplitDown),
+			w.splitItem("New pane up — full width", bd.Node, layout.SplitUp),
+			w.splitItem("New pane down — full width", bd.Node, layout.SplitDown),
+			w.splitItem("New pane left — from the left pane", bd.Node.Children[bd.Index], layout.SplitRight),
+			w.splitItem("New pane right — from the right pane", bd.Node.Children[bd.Index+1], layout.SplitLeft),
 		},
 	}
 	w.markAllDirtyLocked()

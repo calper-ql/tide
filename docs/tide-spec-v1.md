@@ -222,9 +222,11 @@ Capabilities ship as first-party standalone tools that attach to the session
   frame styling.
 - **Boundary semantics and hover** *(ruled 2026-06-11, refinement)*.
   Frame elements are boundaries of their CONTAINER, not handles of a
-  neighboring pane: from the divider between stacked panes, "new pane
-  right" spans the whole stack's height; "new pane here" inserts at the
-  clicked boundary. Corners merge both meeting borders (left/right act at
+  neighboring pane, and every border offers all four directions: the
+  cross-axis pair acts at the container level (from the divider between
+  stacked panes, "new pane right" spans the whole stack's height), while
+  the along-axis pair inserts at the clicked boundary, taking its space
+  from the named neighbor ("new pane down — from the pane below"). Corners merge both meeting borders (left/right act at
   the horizontal divider's container, up/down at the vertical border's);
   corner drags resize both axes. A bar that is not a divider is its
   container's top edge ("above", full width — climbing stacked runs the
