@@ -24,8 +24,13 @@ var clipboardTools = sync.OnceValue(resolveClipboardTools)
 func resolveClipboardTools() map[string][]string {
 	if runtime.GOOS == "darwin" {
 		if _, err := exec.LookPath("pbcopy"); err == nil {
-			// macOS has no PRIMARY selection; primary copies are OSC 52 only.
-			return map[string][]string{protocol.CopyClipboard: {"pbcopy"}}
+			// macOS has no PRIMARY selection, and no terminal forwards ⌘C
+			// to the app, so select-feeds-primary translates to the system
+			// clipboard: select, then ⌘V anywhere (Mac convention).
+			return map[string][]string{
+				protocol.CopyClipboard: {"pbcopy"},
+				protocol.CopyPrimary:   {"pbcopy"},
+			}
 		}
 		return nil
 	}

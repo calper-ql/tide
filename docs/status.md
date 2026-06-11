@@ -53,7 +53,10 @@ drag selections (content-coordinate, transient, cleared by any keystroke
 or focus change) copy to the internal clipboard + the client's clipboard
 (OSC 52 on the render stream, plus a typed copy frame the client pipes
 into pbcopy/wl-copy/xclip/xsel — OSC 52 alone dies in Terminal.app), with
-a bar flash; no selection means 0x03 reaches the shell.
+a bar flash; no selection means 0x03 reaches the shell. On macOS the
+release-time primary feed also lands in the system clipboard
+(copy-on-select: no terminal forwards ⌘C to the app, so select → ⌘V is
+the Mac path).
 Mouse selection feeds PRIMARY on release. Ctrl+V pastes through guards —
 bracketed-paste panes get wrapped pastes, multi-line pastes into bare
 shells get a confirm overlay. Ctrl+Shift+E detaches (kitty keyboard

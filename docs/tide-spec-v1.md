@@ -190,7 +190,16 @@ Capabilities ship as first-party standalone tools that attach to the session
     Copy-on-select to CLIPBOARD stays off.
   - macOS: the collision does not exist — CUA there is Cmd-based (Cmd+C/V
     copy/paste; Ctrl+C always SIGINT). "One control scheme" means the
-    platform's CUA convention.
+    platform's CUA convention. *Amended 2026-06-12: this assumed Cmd+C
+    reaches the app; it never does — every macOS terminal handles ⌘
+    shortcuts itself (Terminal.app copies its own native selection, which
+    is empty while tide owns mouse reporting, and beeps). Since no copy
+    chord can be Mac-CUA, the Mac behavior is copy-on-select: the
+    release-time primary feed maps to the system clipboard on darwin
+    (there is no PRIMARY to collide with) — select, then ⌘V anywhere.
+    Selection-aware Ctrl+C still copies; bare Ctrl+C is still SIGINT.
+    Linux is unchanged: PRIMARY on select, CLIPBOARD only on explicit
+    copy.*
 
 - **Session bar → top** *(ruled 2026-06-10)*. The persistent bar sits at the
   top of the screen (Zed/browser tab-bar model); tabs join it as they land.
