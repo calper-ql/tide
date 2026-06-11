@@ -1,7 +1,7 @@
 # tide — current state
 
 *Living document; update at the end of each increment.*
-*Last updated 2026-06-11 (HEAD `f657919`). Product contract: [tide-spec-v1.md](tide-spec-v1.md).*
+*Last updated 2026-06-11 (HEAD `643941b`). Product contract: [tide-spec-v1.md](tide-spec-v1.md).*
 
 ## Where we are
 
@@ -77,6 +77,14 @@ right-click (macOS Terminal.app never forwards it), but it remains a
 pane-menu accelerator where terminals do. Wheel scrolls daemon-side
 scrollback; apps that request mouse reporting get translated events with
 press-grab drag semantics; Shift bypasses to tide.
+
+**Theme.** Built strictly from the terminal's own 16-color palette and
+default fg/bg — tide inherits the user's theme, adapts to light/dark, and
+needs no truecolor. One ANSI-cyan accent carries all signaling: focused
+pane perimeter, accent pills for the project segment and active tab,
+hover brightening on every interactive element. Rounded corners
+throughout; menu hierarchy via a soft surface with dimmed titles; exited
+panes tint red. The palette is one constant block in compositor.go.
 
 **Sessions and persistence.** Identity = canonical project root; layout
 (tabs, splits, ratios, focus) persists in sessions.json on every
