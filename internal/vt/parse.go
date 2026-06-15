@@ -13,6 +13,13 @@ func (t *State) parse(c rune) {
 	t.logf("%q", string(c))
 	if isControlCode(c) {
 		if t.handleControlCodes(c) || t.cur.Attr.Mode&attrGfx == 0 {
+			// tide: a control code at ground ends the run of printable text,
+			// so REP (CSI b) has no glyph to repeat (matches st's term.lastc).
+			// ESC starts a sequence, though — it must NOT clear lastChar, or
+			// the very CSI b that follows would find nothing to repeat.
+			if c != 033 {
+				t.lastChar = 0
+			}
 			return
 		}
 	}
@@ -21,11 +28,6 @@ func (t *State) parse(c rune) {
 	if t.mode&ModeWrap != 0 && t.cur.State&cursorWrapNext != 0 {
 		t.lines[t.cur.Y][t.cur.X].Mode |= attrWrap
 		t.newline(true)
-	}
-
-	if t.mode&ModeInsert != 0 && t.cur.X+1 < t.cols {
-		// TODO: move shiz, look at st.c:2458
-		t.logln("insert mode not implemented")
 	}
 
 	// tide: double-width glyphs occupy a lead cell plus a dummy cell, like
@@ -44,12 +46,17 @@ func (t *State) parse(c rune) {
 				return
 			}
 		}
+		// tide: IRM (insert mode) shifts the tail right before placing.
+		if t.mode&ModeInsert != 0 {
+			t.insertBlanks(2)
+		}
 		x, y := t.cur.X, t.cur.Y
 		t.setChar(c, &t.cur.Attr, x, y)
 		t.lines[y][x].Mode |= attrWide
 		t.setChar(0, &t.cur.Attr, x+1, y)
 		t.lines[y][x+1].Char = 0
 		t.lines[y][x+1].Mode |= attrWideDummy
+		t.lastChar = c
 		if x+2 < t.cols {
 			t.moveTo(x+2, y)
 		} else {
@@ -59,7 +66,11 @@ func (t *State) parse(c rune) {
 		return
 	}
 
+	if t.mode&ModeInsert != 0 { // tide: IRM
+		t.insertBlanks(1)
+	}
 	t.setChar(c, &t.cur.Attr, t.cur.X, t.cur.Y)
+	t.lastChar = c
 	if t.cur.X+1 < t.cols {
 		t.moveTo(t.cur.X+1, t.cur.Y)
 	} else {
@@ -91,6 +102,9 @@ func (t *State) parseEsc(c rune) {
 	case ')', // set secondary charset G1 (ignored)
 		'*', // set tertiary charset G2 (ignored)
 		'+': // set quaternary charset G3 (ignored)
+		// tide: still consume the selector byte that follows, or it prints to
+		// the screen as literal text (e.g. the '0' in ESC ) 0).
+		next = t.parseEscIgnoreCharset
 	case 'D': // IND - linefeed
 		if t.cur.Y == t.bottom {
 			t.scrollUp(t.top, 1)
@@ -182,6 +196,16 @@ func (t *State) parseEscAltCharset(c rune) {
 	t.state = t.parse
 }
 
+// parseEscIgnoreCharset consumes (and discards) the selector byte after an
+// ESC ) / ESC * / ESC + G1/G2/G3 charset designation.
+func (t *State) parseEscIgnoreCharset(c rune) {
+	if t.handleControlCodes(c) {
+		return
+	}
+	t.logf("%q", string(c))
+	t.state = t.parse
+}
+
 func (t *State) parseEscTest(c rune) {
 	if t.handleControlCodes(c) {
 		return
@@ -193,6 +217,7 @@ func (t *State) parseEscTest(c rune) {
 				t.setChar('E', &t.cur.Attr, x, y)
 			}
 		}
+		t.moveTo(0, 0) // tide: DECALN homes the cursor after the fill
 	}
 	t.state = t.parse
 }
@@ -229,7 +254,11 @@ func (t *State) handleControlCodes(c rune) bool {
 		// alt charset escapes, probably for line drawing
 	// SUB, CAN
 	case 032, 030:
+		// tide: abort any in-flight escape/CSI and return to ground. Upstream
+		// reset the CSI buffer but left t.state mid-CSI, so the next byte was
+		// swallowed and could fire a spurious command.
 		t.csi.reset()
+		t.state = t.parse
 	// ignore ENQ, NUL, XON, XOFF, DEL
 	case 005, 000, 021, 023, 0177:
 	default:

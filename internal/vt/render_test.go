@@ -120,6 +120,7 @@ func TestSnapshotRoundtrip(t *testing.T) {
 		{"sgr-zoo", "\x1b[1;31mbold red\x1b[0m \x1b[4;42munder green-bg\x1b[0m " +
 			"\x1b[38;5;200mxterm\x1b[0m \x1b[38;2;1;2;3mrgb\x1b[0m \x1b[90mbright\x1b[m"},
 		{"reverse-bold", "\x1b[7;1;31;44mREV\x1b[0m plain \x1b[7mdefrev\x1b[27m"},
+		{"faint", "\x1b[2mdim\x1b[22m normal \x1b[2;31mdim-red\x1b[0m \x1b[1;2mbold+dim\x1b[0m"},
 		{"cup-clears", "1234567890\x1b[1;3H\x1b[K\x1b[10;10Hmid\x1b[2;1Habove\x1b[J"},
 		{"region-origin", "\x1b[5;20r\x1b[?6htop\r\n\x1b[20;1Hbottom-line\r\nscrolled"},
 		{"region-no-origin", "\x1b[3;10rline\r\nline\r\nline\r\nline"},

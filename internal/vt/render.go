@@ -88,7 +88,7 @@ func blankLine(l line) bool {
 		if g.Char != ' ' && g.Char != 0 {
 			return false
 		}
-		if g.BG != DefaultBG || g.Mode&(attrReverse|attrUnderline) != 0 {
+		if g.BG != DefaultBG || g.Mode&(attrReverse|attrUnderline|attrStrike|attrOverline) != 0 {
 			return false
 		}
 	}
@@ -231,6 +231,11 @@ func (t *State) renderScreenLocked(b *bytes.Buffer) {
 		b.WriteString("\x1b(0")
 	}
 
+	// tide: cursor shape (DECSCUSR), restored when an app set a non-default one.
+	if t.cursorShape > 0 {
+		fmt.Fprintf(b, "\x1b[%d q", t.cursorShape)
+	}
+
 	// Cursor visibility last.
 	if t.mode&ModeHide != 0 {
 		b.WriteString("\x1b[?25l")
@@ -292,6 +297,9 @@ func appendSGR(b *bytes.Buffer, g Glyph) {
 	if g.Mode&attrBold != 0 {
 		b.WriteString(";1")
 	}
+	if g.Mode&attrFaint != 0 {
+		b.WriteString(";2")
+	}
 	if g.Mode&attrItalic != 0 {
 		b.WriteString(";3")
 	}
@@ -300,6 +308,15 @@ func appendSGR(b *bytes.Buffer, g Glyph) {
 	}
 	if g.Mode&attrBlink != 0 {
 		b.WriteString(";5")
+	}
+	if g.Mode&attrConceal != 0 {
+		b.WriteString(";8")
+	}
+	if g.Mode&attrStrike != 0 {
+		b.WriteString(";9")
+	}
+	if g.Mode&attrOverline != 0 {
+		b.WriteString(";53")
 	}
 	appendColor(b, fg, true)
 	appendColor(b, bg, false)

@@ -75,6 +75,14 @@ func (t *Term) CursorState() (x, y int, visible bool) {
 	return t.cur.X, t.cur.Y, t.mode&ModeHide == 0
 }
 
+// CursorShape returns the DECSCUSR cursor style an inner program set (0 = none
+// set; the client keeps its own default).
+func (t *Term) CursorShape() int {
+	t.State.lock()
+	defer t.State.unlock()
+	return t.cursorShape
+}
+
 // ModeSnapshot returns the current mode flags under the lock.
 func (t *Term) ModeSnapshot() ModeFlag {
 	t.State.lock()

@@ -31,3 +31,11 @@ func (t *State) historyLine(i int) line {
 func (t *State) HistoryLen() int {
 	return t.historyCount
 }
+
+// clearHistory drops all scrollback (ED 3 / CSI 3 J). The visible screen is
+// untouched.
+func (t *State) clearHistory() {
+	t.history = t.history[:0]
+	t.historyStart = 0
+	t.historyCount = 0
+}

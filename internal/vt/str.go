@@ -69,10 +69,9 @@ func (t *State) handleSTR() {
 		var p *string
 		switch d := s.arg(0, 0); d {
 		case 0, 1, 2:
-			title := s.argString(1, "")
-			if title != "" {
-				t.setTitle(title)
-			}
+			// tide: an empty string clears the title (st/xterm), so an app can
+			// reset a stale title — don't gate on non-empty.
+			t.setTitle(s.argString(1, ""))
 		case 10:
 			if len(s.args) < 2 {
 				break

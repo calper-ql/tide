@@ -25,6 +25,10 @@ const (
 	attrWrap
 	attrWide      // tide: lead cell of a double-width glyph
 	attrWideDummy // tide: right half of a double-width glyph (Char 0)
+	attrFaint     // tide: SGR 2 (dim); preserved and re-emitted, the client renders it
+	attrStrike    // tide: SGR 9 (crossed-out)
+	attrConceal   // tide: SGR 8 (invisible)
+	attrOverline  // tide: SGR 53 (overlined)
 )
 
 const (
@@ -109,6 +113,12 @@ type State struct {
 	tabs          []bool
 	title         string
 	colorOverride map[Color]Color
+
+	// tide: last printed graphic rune, for REP (CSI b).
+	lastChar rune
+	// tide: DECSCUSR cursor style (CSI Ps SP q). 0 or 1 = blinking block
+	// (default); 2 steady block, 3/4 underline, 5/6 bar.
+	cursorShape int
 
 	// tide: fixed-capacity ring of lines scrolled off the top of the main
 	// screen; see scrollback.go.
@@ -281,10 +291,11 @@ func (t *State) putTab(forward bool) {
 func (t *State) newline(firstCol bool) {
 	y := t.cur.Y
 	if y == t.bottom {
-		cur := t.cur
-		t.cur = t.defaultCursor()
+		// tide: scroll with the live pen so the newly exposed bottom line is
+		// filled with the current background (BCE), matching IND/SU and st's
+		// tnewline. Upstream reset the pen to default here, breaking BCE on
+		// LF/auto-wrap scrolls.
 		t.scrollUp(t.top, 1)
-		t.cur = cur
 	} else {
 		y++
 	}
@@ -345,7 +356,26 @@ func (t *State) defaultCursor() Cursor {
 	return c
 }
 
+// softReset implements DECSTR (CSI ! p): reset the pen, origin mode, IRM,
+// cursor visibility, the scroll region, and the saved cursor — WITHOUT
+// clearing the screen or moving the cursor (apps use it to get a clean slate
+// mid-session, e.g. before drawing a fresh UI).
+func (t *State) softReset() {
+	def := t.defaultCursor()
+	t.cur.Attr = def.Attr
+	t.cur.State &^= cursorOrigin
+	t.curSaved = def
+	t.modMode(false, ModeInsert)
+	t.modMode(false, ModeHide)
+	t.setScroll(0, t.rows-1)
+}
+
 func (t *State) reset() {
+	// tide: RIS returns to the main buffer; without the swap the alt bit is
+	// cleared but t.lines still points at the alt buffer, orphaning content.
+	if t.mode&ModeAltScreen != 0 {
+		t.swapScreen()
+	}
 	t.cur = t.defaultCursor()
 	t.saveCursor()
 	for i := range t.tabs {
@@ -357,7 +387,11 @@ func (t *State) reset() {
 	t.top = 0
 	t.bottom = t.rows - 1
 	t.mode = ModeWrap
-	t.clear(0, 0, t.rows-1, t.cols-1)
+	t.colorOverride = make(map[Color]Color) // RIS resets palette overrides
+	t.cursorShape = 0
+	// tide: clear the WHOLE screen — upstream transposed the args
+	// (rows-1,cols-1), wiping only a square corner.
+	t.clearAll()
 	t.moveTo(0, 0)
 }
 
@@ -461,6 +495,12 @@ func (t *State) clear(x0, y0, x1, y1 int) {
 		for x := x0; x <= x1; x++ {
 			t.lines[y][x] = t.cur.Attr
 			t.lines[y][x].Char = ' '
+			// tide: erase is background-color-erase — the cleared cell keeps
+			// the pen's fg/bg but drops every other rendition (underline,
+			// bold, ...). Carrying underline here is what painted a continuous
+			// underscore across blank space under apps that set underline then
+			// erase to end of line (lazygit). Matches st (gp->mode = 0).
+			t.lines[y][x].Mode = 0
 		}
 		// tide: a clear that cuts a double-width pair leaves no torn halves.
 		if x0 > 0 && t.lines[y][x0-1].Mode&attrWide != 0 {
@@ -725,29 +765,51 @@ func (t *State) setMode(priv bool, set bool, args []int) {
 	}
 }
 
-func (t *State) setAttr(attr []int) {
+// setAttr applies an SGR parameter list. sub[i] marks args[i] as a colon
+// sub-parameter (see csiEscape), letting ESC[4:3m and ESC[38:2:r:g:bm be
+// told apart from their ';' forms.
+func (t *State) setAttr(attr []int, sub []bool) {
 	if len(attr) == 0 {
 		attr = []int{0}
 	}
+	isSub := func(k int) bool { return k >= 0 && k < len(sub) && sub[k] }
 	for i := 0; i < len(attr); i++ {
 		a := attr[i]
 		switch a {
 		case 0:
-			t.cur.Attr.Mode &^= attrReverse | attrUnderline | attrBold | attrItalic | attrBlink
+			t.cur.Attr.Mode &^= attrReverse | attrUnderline | attrBold | attrFaint |
+				attrItalic | attrBlink | attrStrike | attrConceal | attrOverline
 			t.cur.Attr.FG = DefaultFG
 			t.cur.Attr.BG = DefaultBG
 		case 1:
 			t.cur.Attr.Mode |= attrBold
+		case 2: // tide: faint/dim
+			t.cur.Attr.Mode |= attrFaint
 		case 3:
 			t.cur.Attr.Mode |= attrItalic
 		case 4:
-			t.cur.Attr.Mode |= attrUnderline
+			// tide: ESC[4:Nm is a single styled underline (N=0 off, else on);
+			// ESC[4;Nm would be two separate SGRs. Without sub-params, plain on.
+			if isSub(i + 1) {
+				if attr[i+1] == 0 {
+					t.cur.Attr.Mode &^= attrUnderline
+				} else {
+					t.cur.Attr.Mode |= attrUnderline
+				}
+				i++
+			} else {
+				t.cur.Attr.Mode |= attrUnderline
+			}
 		case 5, 6: // slow, rapid blink
 			t.cur.Attr.Mode |= attrBlink
 		case 7:
 			t.cur.Attr.Mode |= attrReverse
-		case 21, 22:
-			t.cur.Attr.Mode &^= attrBold
+		case 8: // tide: conceal/invisible
+			t.cur.Attr.Mode |= attrConceal
+		case 9: // tide: crossed-out
+			t.cur.Attr.Mode |= attrStrike
+		case 21, 22: // tide: 22 is normal intensity — clears both bold and faint
+			t.cur.Attr.Mode &^= attrBold | attrFaint
 		case 23:
 			t.cur.Attr.Mode &^= attrItalic
 		case 24:
@@ -756,48 +818,35 @@ func (t *State) setAttr(attr []int) {
 			t.cur.Attr.Mode &^= attrBlink
 		case 27:
 			t.cur.Attr.Mode &^= attrReverse
+		case 28: // tide: reveal (conceal off)
+			t.cur.Attr.Mode &^= attrConceal
+		case 29: // tide: not crossed-out
+			t.cur.Attr.Mode &^= attrStrike
 		case 38:
-			if i+2 < len(attr) && attr[i+1] == 5 {
-				i += 2
-				if between(attr[i], 0, 255) {
-					t.cur.Attr.FG = Color(attr[i])
-				} else {
-					t.logf("bad fgcolor %d\n", attr[i])
-				}
-			} else if i+4 < len(attr) && attr[i+1] == 2 {
-				i += 4
-				r, g, b := attr[i-2], attr[i-1], attr[i]
-				if !between(r, 0, 255) || !between(g, 0, 255) || !between(b, 0, 255) {
-					t.logf("bad fg rgb color (%d,%d,%d)\n", r, g, b)
-				} else {
-					t.cur.Attr.FG = Color(r<<16 | g<<8 | b)
-				}
-			} else {
-				t.logf("gfx attr %d unknown\n", a)
+			col, ok, ni := sgrColor(attr, sub, i)
+			if ok {
+				t.cur.Attr.FG = col
 			}
+			i = ni
 		case 39:
 			t.cur.Attr.FG = DefaultFG
 		case 48:
-			if i+2 < len(attr) && attr[i+1] == 5 {
-				i += 2
-				if between(attr[i], 0, 255) {
-					t.cur.Attr.BG = Color(attr[i])
-				} else {
-					t.logf("bad bgcolor %d\n", attr[i])
-				}
-			} else if i+4 < len(attr) && attr[i+1] == 2 {
-				i += 4
-				r, g, b := attr[i-2], attr[i-1], attr[i]
-				if !between(r, 0, 255) || !between(g, 0, 255) || !between(b, 0, 255) {
-					t.logf("bad bg rgb color (%d,%d,%d)\n", r, g, b)
-				} else {
-					t.cur.Attr.BG = Color(r<<16 | g<<8 | b)
-				}
-			} else {
-				t.logf("gfx attr %d unknown\n", a)
+			col, ok, ni := sgrColor(attr, sub, i)
+			if ok {
+				t.cur.Attr.BG = col
 			}
+			i = ni
 		case 49:
 			t.cur.Attr.BG = DefaultBG
+		case 53: // tide: overline
+			t.cur.Attr.Mode |= attrOverline
+		case 55: // tide: not overlined
+			t.cur.Attr.Mode &^= attrOverline
+		case 58: // tide: underline color — consumed so it can't poison the
+			// following args; the value is not stored (underline still shows).
+			_, _, ni := sgrColor(attr, sub, i)
+			i = ni
+		case 59: // default underline color — no-op
 		default:
 			if between(a, 30, 37) {
 				t.cur.Attr.FG = Color(a - 30)
@@ -812,6 +861,51 @@ func (t *State) setAttr(attr []int) {
 			}
 		}
 	}
+}
+
+// sgrColor parses an extended color whose selector (38/48/58) is at attr[i].
+// It handles both the legacy ';' form (38;5;n, 38;2;r;g;b) and the ITU ':'
+// sub-parameter form (38:5:n, 38:2:r:g:b, 38:2:CS:r:g:b with an optional
+// colorspace id), matching xterm and st. It returns the color, whether it
+// parsed, and the index of the last argument it consumed.
+func sgrColor(attr []int, sub []bool, i int) (Color, bool, int) {
+	subAt := func(k int) bool { return k >= 0 && k < len(sub) && sub[k] }
+	if i+1 >= len(attr) {
+		return 0, false, i
+	}
+	if subAt(i + 1) {
+		j := i + 1
+		for j+1 < len(attr) && subAt(j+1) {
+			j++
+		}
+		parts := attr[i+1 : j+1] // [5,n] or [2,r,g,b] or [2,CS,r,g,b]
+		switch {
+		case len(parts) >= 2 && parts[0] == 5:
+			if between(parts[1], 0, 255) {
+				return Color(parts[1]), true, j
+			}
+		case len(parts) >= 4 && parts[0] == 2:
+			r, g, b := parts[len(parts)-3], parts[len(parts)-2], parts[len(parts)-1]
+			if between(r, 0, 255) && between(g, 0, 255) && between(b, 0, 255) {
+				return Color(r<<16 | g<<8 | b), true, j
+			}
+		}
+		return 0, false, j
+	}
+	switch {
+	case i+2 < len(attr) && attr[i+1] == 5:
+		if between(attr[i+2], 0, 255) {
+			return Color(attr[i+2]), true, i + 2
+		}
+		return 0, false, i + 2
+	case i+4 < len(attr) && attr[i+1] == 2:
+		r, g, b := attr[i+2], attr[i+3], attr[i+4]
+		if between(r, 0, 255) && between(g, 0, 255) && between(b, 0, 255) {
+			return Color(r<<16 | g<<8 | b), true, i + 4
+		}
+		return 0, false, i + 4
+	}
+	return 0, false, i
 }
 
 func (t *State) insertBlanks(n int) {

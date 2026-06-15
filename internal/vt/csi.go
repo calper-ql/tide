@@ -14,14 +14,25 @@ import (
 type csiEscape struct {
 	buf  []byte
 	args []int
-	mode byte
-	priv bool
+	// tide: argsSub[i] marks args[i] as a colon SUB-parameter of an earlier
+	// arg (ECMA-48 / ITU T.416), so setAttr can tell ESC[4:3m (one styled
+	// underline) from ESC[4;3m (underline + italic) and parse the colon
+	// direct-color forms ESC[38:2:r:g:bm.
+	argsSub []bool
+	mode    byte
+	// tide: the trailing intermediate byte (0x20-0x2F), e.g. the SP in
+	// DECSCUSR (CSI Ps SP q) or the '!' in DECSTR (CSI ! p). Upstream fed it
+	// to Atoi, which failed and dropped the whole sequence.
+	inter byte
+	priv  bool
 }
 
 func (c *csiEscape) reset() {
 	c.buf = c.buf[:0]
 	c.args = c.args[:0]
+	c.argsSub = c.argsSub[:0]
 	c.mode = 0
+	c.inter = 0
 	c.priv = false
 }
 
@@ -36,24 +47,51 @@ func (c *csiEscape) put(b byte) bool {
 
 func (c *csiEscape) parse() {
 	c.mode = c.buf[len(c.buf)-1]
+	c.args = c.args[:0]
+	c.argsSub = c.argsSub[:0]
+	c.inter = 0
 	if len(c.buf) == 1 {
 		return
 	}
-	s := string(c.buf)
-	c.args = c.args[:0]
-	if s[0] == '?' {
-		c.priv = true
+	s := string(c.buf[:len(c.buf)-1]) // drop the final byte
+	// Leading private/marker byte. Only '?' sets priv; '>' and '=' are kept
+	// out of the parameter text but resolved via c.buf elsewhere (DA).
+	if len(s) > 0 && (s[0] == '?' || s[0] == '>' || s[0] == '=') {
+		if s[0] == '?' {
+			c.priv = true
+		}
 		s = s[1:]
 	}
-	s = s[:len(s)-1]
-	ss := strings.Split(s, ";")
-	for _, p := range ss {
-		i, err := strconv.Atoi(p)
-		if err != nil {
-			//t.logf("invalid CSI arg '%s'\n", p)
+	// Trailing intermediate bytes (0x20-0x2F); keep the last (single in
+	// practice for DECSCUSR/DECSTR/DECSCL/DECRQM).
+	for len(s) > 0 {
+		last := s[len(s)-1]
+		if last >= 0x20 && last <= 0x2f {
+			c.inter = last
+			s = s[:len(s)-1]
+		} else {
 			break
 		}
-		c.args = append(c.args, i)
+	}
+	if s == "" {
+		return
+	}
+	// Parameters are ';'-separated; each may carry ':'-separated
+	// sub-parameters. An omitted field is the default (0), matching st's
+	// strtol-on-empty and xterm — never break and drop the rest.
+	for _, tok := range strings.Split(s, ";") {
+		sub := false
+		for _, part := range strings.Split(tok, ":") {
+			v := 0
+			if part != "" {
+				if n, err := strconv.Atoi(part); err == nil {
+					v = n
+				}
+			}
+			c.args = append(c.args, v)
+			c.argsSub = append(c.argsSub, sub)
+			sub = true
+		}
 	}
 }
 
@@ -71,6 +109,10 @@ func (c *csiEscape) maxarg(i, def int) int {
 
 func (t *State) handleCSI() {
 	c := &t.csi
+	if c.inter != 0 {
+		t.handleCSIInter()
+		return
+	}
 	switch c.mode {
 	default:
 		goto unknown
@@ -96,9 +138,9 @@ func (t *State) handleCSI() {
 	case 'D': // CUB - cursor <n> backward
 		t.moveTo(t.cur.X-c.maxarg(0, 1), t.cur.Y)
 	case 'E': // CNL - cursor <n> down and first col
-		t.moveTo(0, t.cur.Y+c.arg(0, 1))
+		t.moveTo(0, t.cur.Y+c.maxarg(0, 1))
 	case 'F': // CPL - cursor <n> up and first col
-		t.moveTo(0, t.cur.Y-c.arg(0, 1))
+		t.moveTo(0, t.cur.Y-c.maxarg(0, 1))
 	case 'g': // TBC - tabulation clear
 		switch c.arg(0, 0) {
 		// clear current tab stop
@@ -130,12 +172,17 @@ func (t *State) handleCSI() {
 				t.clear(0, t.cur.Y+1, t.cols-1, t.rows-1)
 			}
 		case 1: // above
-			if t.cur.Y > 1 {
+			// tide: rows strictly above the cursor are cleared in full, then
+			// the cursor row up to the cursor. Upstream guarded with >1, so a
+			// cursor on row 1 left row 0 uncleared.
+			if t.cur.Y > 0 {
 				t.clear(0, 0, t.cols-1, t.cur.Y-1)
 			}
 			t.clear(0, t.cur.Y, t.cur.X, t.cur.Y)
 		case 2: // all
 			t.clear(0, 0, t.cols-1, t.rows-1)
+		case 3: // tide: clear scrollback (xterm). The screen is untouched.
+			t.clearHistory()
 		default:
 			goto unknown
 		}
@@ -167,12 +214,22 @@ func (t *State) handleCSI() {
 		for i := 0; i < n; i++ {
 			t.putTab(false)
 		}
+	case 'b': // REP - repeat the last printed graphic char <n> times
+		// tide: TERM=xterm-256color advertises the 'rep' capability, so apps
+		// (and terminfo) emit CSI b. Mirrors st: no-op with no prior char,
+		// count clamped (a huge count must not wedge the daemon).
+		if t.lastChar != 0 {
+			n := clamp(c.maxarg(0, 1), 1, 65535)
+			for i := 0; i < n; i++ {
+				t.parse(t.lastChar)
+			}
+		}
 	case 'd': // VPA - move to <row>
 		t.moveAbsTo(t.cur.X, c.arg(0, 1)-1)
 	case 'h': // SM - set terminal mode
 		t.setMode(c.priv, true, c.args)
 	case 'm': // SGR - terminal attribute (color)
-		t.setAttr(c.args)
+		t.setAttr(c.args, c.argsSub)
 	case 'n':
 		switch c.arg(0, 0) {
 		case 5: // DSR - device status report
@@ -184,8 +241,13 @@ func (t *State) handleCSI() {
 		if c.priv {
 			goto unknown
 		} else {
-			t.setScroll(c.arg(0, 1)-1, c.arg(1, t.rows)-1)
-			t.moveAbsTo(0, 0)
+			// tide: an inverted/degenerate region (top >= bottom) is ignored,
+			// not swapped into a region the app never asked for (xterm).
+			top, bot := c.arg(0, 1)-1, c.arg(1, t.rows)-1
+			if top < bot {
+				t.setScroll(top, bot)
+				t.moveAbsTo(0, 0)
+			}
 		}
 	case 's': // DECSC - save cursor position (ANSI.SYS)
 		t.saveCursor()
@@ -196,4 +258,21 @@ func (t *State) handleCSI() {
 unknown: // TODO: get rid of this goto
 	t.logf("unknown CSI sequence '%c'\n", c.mode)
 	// TODO: c.dump()
+}
+
+// handleCSIInter dispatches CSI sequences that carry an intermediate byte.
+// Upstream fed the intermediate to Atoi, dropping these entirely.
+func (t *State) handleCSIInter() {
+	c := &t.csi
+	switch {
+	case c.inter == ' ' && c.mode == 'q': // DECSCUSR - set cursor style/shape
+		// arg omitted -> 0 (no forced shape; the client keeps its default).
+		t.cursorShape = c.arg(0, 0)
+	case c.inter == '!' && c.mode == 'p': // DECSTR - soft terminal reset
+		t.softReset()
+	case c.inter == '"' && c.mode == 'p': // DECSCL - conformance level; ignored
+	case c.inter == '$' && c.mode == 'p': // DECRQM - request mode; no reply (apps tolerate)
+	default:
+		t.logf("unknown CSI intermediate %q mode %q\n", string(c.inter), string(c.mode))
+	}
 }

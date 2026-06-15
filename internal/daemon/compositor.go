@@ -557,6 +557,12 @@ func (w *ws) placeCursorLocked(b *bytes.Buffer) {
 		return
 	}
 	cup(b, c.Y+y, c.X+x)
+	// Forward the focused pane's cursor shape (DECSCUSR) so vim's beam/block
+	// reaches the client. Only when the pane set one — otherwise the client
+	// keeps its own default.
+	if shape := p.term.CursorShape(); shape > 0 {
+		fmt.Fprintf(b, "\x1b[%d q", shape)
+	}
 	b.WriteString("\x1b[?25h")
 }
 
