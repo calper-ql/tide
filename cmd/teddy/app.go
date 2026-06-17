@@ -110,6 +110,13 @@ type App struct {
 	pressClose int // tab whose close glyph was pressed, or -1
 
 	mdToggle tui.Rect // status-bar markdown viz/raw toggle, for hit-testing
+	teddyHit tui.Rect // the "teddy ▴" pill — opens the actions menu
+
+	menuOpen  bool
+	menuItems []menuItem
+	menuRects []tui.Rect
+
+	tabPinActive bool // next render scrolls the strip to reveal the active tab
 
 	last regions // geometry from the last render, for mouse hit-testing
 }
@@ -170,6 +177,12 @@ func (a *App) handle(ev tui.Event) {
 }
 
 func (a *App) handleKey(ev input.Event) {
+	if a.menuOpen { // Esc closes the actions menu; other keys are swallowed
+		if ev.Key == input.KeyEscape {
+			a.menuOpen = false
+		}
+		return
+	}
 	d := a.activeDoc()
 	if ev.Mods&input.Ctrl != 0 && ev.Key == input.KeyRune {
 		switch ev.Rune {
@@ -206,6 +219,15 @@ func (a *App) handleKey(ev input.Event) {
 }
 
 func (a *App) handleMouse(ev input.Event) {
+	// While the actions menu is open it is modal: only a press matters (pick
+	// an item or dismiss); ignore wheel/drag underneath it.
+	if a.menuOpen {
+		if ev.Mouse == input.MousePress && ev.Button == 1 {
+			a.clickMenu(ev.X, ev.Y)
+		}
+		return
+	}
+
 	switch ev.Mouse {
 	case input.MouseWheelUp:
 		a.wheel(ev, -3)
@@ -232,6 +254,10 @@ func (a *App) handleMouse(ev input.Event) {
 	// A fresh left-press: clear any stale tab-drag arming.
 	a.dragFrom, a.pressClose = -1, -1
 
+	if a.teddyHit.Contains(ev.X, ev.Y) {
+		a.menuOpen = true
+		return
+	}
 	if a.mdToggle.Contains(ev.X, ev.Y) {
 		a.togglePreview()
 		return
@@ -264,6 +290,15 @@ func (a *App) handleMouse(ev input.Event) {
 
 // wheel scrolls whichever panel the pointer is over.
 func (a *App) wheel(ev input.Event, delta int) {
+	if a.last.tabs.Contains(ev.X, ev.Y) {
+		step := 1 // move the strip one tab per notch
+		if delta < 0 {
+			step = -1
+		}
+		a.tabFirst = clampInt(a.tabFirst+step, 0, max(len(a.tabs)-1, 0))
+		a.tabPinActive = false // honor the manual scroll; don't snap back to active
+		return
+	}
 	if a.selected == 0 && !a.sideCollapsed && a.last.side.Contains(ev.X, ev.Y) {
 		a.browser.scroll(delta)
 		return
@@ -307,5 +342,9 @@ func (a *App) render() {
 	a.drawTabSeparator(buf, r)
 	a.drawEditor(buf, r.editor)
 	a.drawStatusBar(buf, r.status)
+	if a.menuOpen {
+		a.drawMenu(buf, cols, rows)
+		a.screen.HideCursor() // the modal menu owns focus
+	}
 	_ = a.screen.Flush()
 }

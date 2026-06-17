@@ -19,6 +19,11 @@ var (
 	stStatus    = tui.DefaultStyle.Reversed()
 	stStatusDim = tui.DefaultStyle.Reversed().Fainted()
 
+	// popup menu surface (bright-black bg, like tide's menus)
+	stMenu     = tui.DefaultStyle.WithBG(tui.BrightBlack).WithFG(tui.BrightWhite)
+	stMenuHint = tui.DefaultStyle.WithBG(tui.BrightBlack).WithFG(tui.Cyan)
+	stMenuDim  = tui.DefaultStyle.WithBG(tui.BrightBlack).Fainted()
+
 	stSideTitle = tui.DefaultStyle.Fainted().Bolded()
 
 	stTab       = tui.DefaultStyle.Fainted()

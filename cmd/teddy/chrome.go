@@ -91,12 +91,12 @@ func (a *App) drawTabSeparator(buf *tui.Buffer, r regions) {
 
 func (a *App) drawStatusBar(buf *tui.Buffer, r tui.Rect) {
 	buf.Fill(r, ' ', stStatus)
-	x := drawIn(buf, r, 0, 0, stAccentPill, " teddy ")
-	root := shortenPath(a.root, max(r.W/3, 8))
-	x = drawIn(buf, r, x-r.X+1, 0, stStatusDim, root)
+	// The teddy pill is the actions-menu button (▴: the menu opens upward).
+	end := drawIn(buf, r, 0, 0, stAccentPill, " teddy ▴ ")
+	a.teddyHit = tui.Rect{X: r.X, Y: r.Y, W: end - r.X, H: 1}
+	x := drawIn(buf, r, end-r.X+1, 0, stStatusDim, shortenPath(a.root, max(r.W/3, 8)))
 
-	// A clickable viz/raw pill for markdown docs (mouse-first toggle; Ctrl+E
-	// also works). The pill shows the current mode.
+	// Clickable markdown viz/raw pill (Ctrl+E also toggles).
 	a.mdToggle = tui.Rect{}
 	if d := a.activeDoc(); d != nil && isMarkdown(d.path) {
 		mode := "raw"
@@ -104,22 +104,21 @@ func (a *App) drawStatusBar(buf *tui.Buffer, r tui.Rect) {
 			mode = "viz"
 		}
 		px := x - r.X + 1
-		end := drawIn(buf, r, px, 0, stAccentPill, " md:"+mode+" ")
-		a.mdToggle = tui.Rect{X: r.X + px, Y: r.Y, W: end - (r.X + px), H: 1}
-		x = end
+		mend := drawIn(buf, r, px, 0, stAccentPill, " md:"+mode+" ")
+		a.mdToggle = tui.Rect{X: r.X + px, Y: r.Y, W: mend - (r.X + px), H: 1}
+		x = mend
 	}
 
-	// Right side: cursor position + dirty marker when a doc is open, else hints.
-	right := "^S save  ^B panel  ^Q quit "
+	// Right side: cursor position + a dirty marker. The action hints moved
+	// into the teddy menu, so they stay available with a file open.
 	if d := a.activeDoc(); d != nil {
 		mark := ""
-		if d.dirty {
+		if d.modified() {
 			mark = " ●"
 		}
-		right = fmt.Sprintf("Ln %d, Col %d%s ", d.cy+1, d.cx+1, mark)
-	}
-	hx := r.W - strWidth(right)
-	if hx > (x-r.X)+2 {
-		drawIn(buf, r, hx, 0, stStatusDim, right)
+		right := fmt.Sprintf("Ln %d, Col %d%s ", d.cy+1, d.cx+1, mark)
+		if hx := r.W - strWidth(right); hx > (x-r.X)+2 {
+			drawIn(buf, r, hx, 0, stStatusDim, right)
+		}
 	}
 }

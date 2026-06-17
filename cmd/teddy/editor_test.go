@@ -47,8 +47,24 @@ func TestSaveRoundTrip(t *testing.T) {
 	if string(got) != "Zx\ny\n" {
 		t.Errorf("on disk = %q, want \"Zx\\ny\\n\"", string(got))
 	}
-	if d.dirty {
-		t.Error("doc still dirty after save")
+	if d.modified() {
+		t.Error("doc still modified after save")
+	}
+}
+
+func TestModifiedReflectsDiskState(t *testing.T) {
+	d := newDoc("f.txt", []byte("abc"))
+	if d.modified() {
+		t.Fatal("a freshly loaded doc should be clean")
+	}
+	d.cx = 3
+	d.insertString("X")
+	if !d.modified() {
+		t.Error("after an edit the doc should be modified")
+	}
+	d.Undo()
+	if d.modified() {
+		t.Error("after undoing back to the saved content the doc should be clean")
 	}
 }
 

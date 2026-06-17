@@ -27,6 +27,7 @@ func (a *App) openFile(path string) error {
 	if abs, err := filepath.Abs(path); err == nil {
 		path = abs
 	}
+	a.tabPinActive = true
 	for i, d := range a.tabs {
 		if d.path == path {
 			a.active = i
@@ -54,6 +55,7 @@ func (a *App) closeTab(i int) {
 		a.active--
 	}
 	a.active = clampInt(a.active, 0, max(len(a.tabs)-1, 0))
+	a.tabPinActive = true
 }
 
 // moveTab relocates the tab at from to index to (the drag-reorder primitive).
@@ -98,27 +100,31 @@ func (a *App) drawTabStrip(buf *tui.Buffer, r tui.Rect) {
 	widths := make([]int, len(a.tabs))
 	for i, d := range a.tabs {
 		mark := "✕"
-		if d.dirty {
+		if d.modified() {
 			mark = "●"
 		}
 		segs[i] = " " + labels[i] + " " + mark + " "
 		widths[i] = strWidth(segs[i]) + 1 // + separator
 	}
 
-	// Scroll the strip so the active tab is visible.
 	a.tabFirst = clampInt(a.tabFirst, 0, max(len(a.tabs)-1, 0))
-	if a.active < a.tabFirst {
-		a.tabFirst = a.active
-	}
-	for a.tabFirst < a.active {
-		w := 0
-		for i := a.tabFirst; i <= a.active; i++ {
-			w += widths[i]
+	// Snap the strip to reveal the active tab only when something just made it
+	// active; otherwise honor the manual wheel scroll.
+	if a.tabPinActive {
+		if a.active < a.tabFirst {
+			a.tabFirst = a.active
 		}
-		if w <= r.W {
-			break
+		for a.tabFirst < a.active {
+			w := 0
+			for i := a.tabFirst; i <= a.active; i++ {
+				w += widths[i]
+			}
+			if w <= r.W {
+				break
+			}
+			a.tabFirst++
 		}
-		a.tabFirst++
+		a.tabPinActive = false
 	}
 
 	x := r.X
@@ -133,7 +139,7 @@ func (a *App) drawTabStrip(buf *tui.Buffer, r tui.Rect) {
 		x0 := x
 		end := drawIn(buf, r, x-r.X, 0, st, segs[i])
 		closeX := end - 2 // seg ends " …<mark> ": mark sits one before the trailing space
-		if a.tabs[i].dirty && closeX >= x0 && closeX < r.X+r.W {
+		if a.tabs[i].modified() && closeX >= x0 && closeX < r.X+r.W {
 			buf.Set(closeX, r.Y, '●', stDirty) // tint the dirty marker
 		}
 		a.tabHits = append(a.tabHits, tabHit{idx: i, x0: x0, x1: end, closeX: closeX})
@@ -172,6 +178,7 @@ func (a *App) pressTab(x int) {
 				return
 			}
 			a.active = h.idx
+			a.tabPinActive = true
 			a.dragFrom = h.idx
 			a.dragMoved = false
 			return
@@ -187,6 +194,7 @@ func (a *App) dragTab(x int) {
 		a.moveTab(a.dragFrom, target)
 		a.dragFrom = target
 		a.active = target
+		a.tabPinActive = true
 		a.dragMoved = true
 	}
 }

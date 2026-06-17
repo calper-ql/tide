@@ -40,9 +40,9 @@ type snapshot struct {
 // trips exactly, including a file's trailing newline (which shows as a final
 // empty line — where the cursor may rest).
 type doc struct {
-	path  string
-	lines [][]rune
-	dirty bool
+	path       string
+	lines      [][]rune
+	savedLines [][]rune // content as last loaded/saved; modified() diffs against it
 
 	cx, cy  int // cursor: rune index within line cy, and line index
 	top     int // first visible line
@@ -59,6 +59,9 @@ type doc struct {
 
 	hlLines [][]highlight.Span // cached per-line syntax spans
 	hlReady bool               // false when hlLines needs recomputing
+
+	modCached bool // cached modified() result
+	modValid  bool // is modCached current?
 }
 
 func newDoc(path string, data []byte) *doc {
@@ -67,7 +70,36 @@ func newDoc(path string, data []byte) *doc {
 	for i, p := range parts {
 		lines[i] = []rune(p)
 	}
-	return &doc{path: path, lines: lines, preview: isMarkdown(path)}
+	return &doc{path: path, lines: lines, savedLines: cloneLines(lines), preview: isMarkdown(path)}
+}
+
+// modified reports whether the buffer differs from the on-disk baseline. It
+// compares against the saved content (not a one-way "was edited" flag), so
+// undoing back to the saved state clears the dirty marker. The result is
+// cached and invalidated on each edit.
+func (d *doc) modified() bool {
+	if !d.modValid {
+		d.modCached = !linesEqual(d.lines, d.savedLines)
+		d.modValid = true
+	}
+	return d.modCached
+}
+
+func linesEqual(a, b [][]rune) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if len(a[i]) != len(b[i]) {
+			return false
+		}
+		for j := range a[i] {
+			if a[i][j] != b[i][j] {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // isMarkdownPreview reports whether the doc should render as markdown viz
@@ -92,7 +124,8 @@ func (d *doc) save() error {
 	if err := os.WriteFile(d.path, d.bytes(), 0o644); err != nil {
 		return err
 	}
-	d.dirty = false
+	d.savedLines = cloneLines(d.lines) // new on-disk baseline
+	d.modValid = false
 	return nil
 }
 
@@ -114,7 +147,7 @@ func (d *doc) beginEdit(kind editKind) {
 		d.redo = nil
 	}
 	d.lastKind = kind
-	d.dirty = true
+	d.modValid = false
 	d.hlReady = false
 }
 
@@ -131,7 +164,7 @@ func (d *doc) Undo() {
 	d.undo = d.undo[:len(d.undo)-1]
 	d.lines, d.cx, d.cy = s.lines, s.cx, s.cy
 	d.lastKind = kindNone
-	d.dirty = true
+	d.modValid = false
 	d.hlReady = false
 	d.clamp()
 }
@@ -145,7 +178,7 @@ func (d *doc) Redo() {
 	d.redo = d.redo[:len(d.redo)-1]
 	d.lines, d.cx, d.cy = s.lines, s.cx, s.cy
 	d.lastKind = kindNone
-	d.dirty = true
+	d.modValid = false
 	d.hlReady = false
 	d.clamp()
 }
