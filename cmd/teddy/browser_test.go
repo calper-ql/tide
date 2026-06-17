@@ -60,24 +60,18 @@ func TestBrowserOpensFile(t *testing.T) {
 	}
 }
 
-func TestSidePanelWidthFitsContent(t *testing.T) {
-	dir := t.TempDir()
-	mustWrite(t, filepath.Join(dir, "short.txt"))
-	a := &App{selected: 0, browser: newBrowser(dir)}
-	narrow := a.sidePanelWidth(200)
-	if narrow < minSideWidth {
-		t.Errorf("width %d below min %d", narrow, minSideWidth)
+func TestClampedSideWidth(t *testing.T) {
+	a := &App{sideWidth: 28}
+	if w := a.clampedSideWidth(120); w != 28 {
+		t.Errorf("in-range width = %d, want 28", w)
 	}
-
-	long := "a_very_long_file_name_that_exceeds_the_default_width.txt"
-	mustWrite(t, filepath.Join(dir, long))
-	a.browser = newBrowser(dir)
-	wide := a.sidePanelWidth(200)
-	if wide <= narrow {
-		t.Errorf("width did not grow for a long name: %d <= %d", wide, narrow)
+	a.sideWidth = 2 // too narrow
+	if w := a.clampedSideWidth(120); w != minSideWidth {
+		t.Errorf("clamp-up width = %d, want %d", w, minSideWidth)
 	}
-	if wide > maxSideWidth {
-		t.Errorf("width %d exceeds max %d", wide, maxSideWidth)
+	a.sideWidth = 1000 // too wide: must leave the editor room
+	if w, want := a.clampedSideWidth(80), 80-activityW-minEditorWidth; w != want {
+		t.Errorf("clamp-down width = %d, want %d", w, want)
 	}
 }
 

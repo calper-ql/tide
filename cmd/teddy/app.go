@@ -13,7 +13,7 @@ const (
 	activityW        = 4 // icon column + a gap before the right-edge separator
 	defaultSideWidth = 28
 	minSideWidth     = 16
-	maxSideWidth     = 48
+	minEditorWidth   = 20 // keep at least this many columns for the editor
 )
 
 // activity is one button in the activity bar. Only Explorer is wired in T1;
@@ -69,25 +69,11 @@ func computeLayout(cols, rows, sideWidth int, collapsed bool) regions {
 	}
 }
 
-// sidePanelWidth fits the explorer panel to its content — the widest of the
-// title, the root-folder line, and each visible tree row — clamped to a sane
-// range and at most half the screen. It is recomputed each frame, so the
-// panel grows and shrinks as folders expand. Other activities use the default.
-func (a *App) sidePanelWidth(cols int) int {
-	hi := max(min(maxSideWidth, cols/2), minSideWidth)
-	if a.selected != 0 {
-		return clampInt(defaultSideWidth, minSideWidth, hi)
-	}
-	w := strWidth(activities[a.selected].title) + 1 // title at dx 1
-	w = max(w, strWidth(a.browser.root.name)+2)     // "root/" at dx 1
-	for _, e := range a.browser.flat {
-		rw := 1 + e.depth*2 + 2 + strWidth(e.node.name) // dx + marker + name
-		if e.node.isDir {
-			rw++ // trailing slash
-		}
-		w = max(w, rw)
-	}
-	return clampInt(w+2, minSideWidth, hi) // + right pad + border column
+// clampedSideWidth keeps the user-set sidebar width within sane bounds: at
+// least minSideWidth, and always leaving room for the editor.
+func (a *App) clampedSideWidth(cols int) int {
+	hi := max(cols-activityW-minEditorWidth, minSideWidth)
+	return clampInt(a.sideWidth, minSideWidth, hi)
 }
 
 // App is teddy's whole UI state.
@@ -98,6 +84,8 @@ type App struct {
 
 	selected      int // index into activities
 	sideCollapsed bool
+	sideWidth     int  // user-set sidebar width (draggable divider)
+	sideDrag      bool // currently dragging the sidebar/editor divider
 
 	openArg string // file named on the command line, opened at startup
 
@@ -131,10 +119,11 @@ type App struct {
 
 func newApp(scr *tui.Screen, root string) *App {
 	return &App{
-		screen:   scr,
-		root:     root,
-		browser:  newBrowser(root),
-		dragFrom: -1, pressClose: -1,
+		screen:    scr,
+		root:      root,
+		sideWidth: defaultSideWidth,
+		browser:   newBrowser(root),
+		dragFrom:  -1, pressClose: -1,
 	}
 }
 
@@ -265,11 +254,15 @@ func (a *App) handleMouse(ev input.Event) {
 		a.wheel(ev, 3)
 		return
 	case input.MouseMotion:
-		if a.dragFrom >= 0 {
+		switch {
+		case a.sideDrag:
+			a.sideWidth = ev.X - activityW + 1 // divider follows the pointer
+		case a.dragFrom >= 0:
 			a.dragTab(ev.X)
 		}
 		return
 	case input.MouseRelease:
+		a.sideDrag = false
 		a.releaseTab(ev)
 		return
 	case input.MousePress:
@@ -280,8 +273,8 @@ func (a *App) handleMouse(ev input.Event) {
 		return
 	}
 
-	// A fresh left-press: clear any stale tab-drag arming.
-	a.dragFrom, a.pressClose = -1, -1
+	// A fresh left-press: clear any stale tab/divider drag arming.
+	a.dragFrom, a.pressClose, a.sideDrag = -1, -1, false
 
 	if a.teddyHit.Contains(ev.X, ev.Y) {
 		a.menuOpen = true
@@ -290,6 +283,14 @@ func (a *App) handleMouse(ev input.Event) {
 	if a.mdToggle.Contains(ev.X, ev.Y) {
 		a.togglePreview()
 		return
+	}
+	// The sidebar/editor divider (the panel's right border) resizes on drag.
+	if !a.sideCollapsed && a.last.side.W > 0 {
+		dividerX := a.last.side.X + a.last.side.W - 1
+		if ev.X == dividerX && ev.Y >= a.last.side.Y && ev.Y < a.last.side.Y+a.last.side.H {
+			a.sideDrag = true
+			return
+		}
 	}
 	if a.last.tabs.Contains(ev.X, ev.Y) {
 		a.pressTab(ev.X)
@@ -369,7 +370,7 @@ func (a *App) render() {
 	cols, rows := a.screen.Size()
 	buf.Clear(stText)
 
-	r := computeLayout(cols, rows, a.sidePanelWidth(cols), a.sideCollapsed)
+	r := computeLayout(cols, rows, a.clampedSideWidth(cols), a.sideCollapsed)
 	a.last = r
 
 	// Default to a hidden cursor; the editor shows it when a doc is focused.
