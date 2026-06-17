@@ -26,7 +26,7 @@ func TestRunSearchFindsMatchesSkipsGitAndBinary(t *testing.T) {
 	write("sub/notes.txt", []byte("nothing here\nHELLO again\n")) // case-insensitive
 
 	ch := make(chan searchMsg, 1)
-	runSearch(context.Background(), dir, "hello", 7, ch)
+	runSearch(context.Background(), dir, searchOpts{query: "hello"}, 7, ch)
 	msg := <-ch
 
 	if msg.seq != 7 {
@@ -44,6 +44,49 @@ func TestRunSearchFindsMatchesSkipsGitAndBinary(t *testing.T) {
 	}
 	if r, ok := byBase["notes.txt"]; !ok || r.line != 2 {
 		t.Errorf("notes.txt match = %+v, want line 2 (case-insensitive)", r)
+	}
+}
+
+func TestBuildMatcher(t *testing.T) {
+	must := func(o searchOpts) func(string) (int, bool) {
+		m, err := buildMatcher(o)
+		if err != nil {
+			t.Fatalf("buildMatcher(%+v): %v", o, err)
+		}
+		return m
+	}
+	ok := func(m func(string) (int, bool), line string) bool { _, ok := m(line); return ok }
+
+	// Default: case-insensitive literal.
+	if !ok(must(searchOpts{query: "foo"}), "a FOO b") {
+		t.Error("case-insensitive literal should match FOO")
+	}
+	// Match case.
+	mc := must(searchOpts{query: "foo", matchCase: true})
+	if ok(mc, "a FOO b") {
+		t.Error("case-sensitive should not match FOO")
+	}
+	if col, hit := mc("a foo b"); !hit || col != 3 {
+		t.Errorf("case-sensitive col = %d, hit = %v, want col 3", col, hit)
+	}
+	// Whole word.
+	ww := must(searchOpts{query: "foo", wholeWord: true})
+	if ok(ww, "foobar") {
+		t.Error("whole-word should not match foobar")
+	}
+	if !ok(ww, "a foo b") {
+		t.Error("whole-word should match standalone foo")
+	}
+	// Regex on vs literal dot.
+	if !ok(must(searchOpts{query: "f.o", regex: true}), "fzo") {
+		t.Error("regex f.o should match fzo")
+	}
+	if ok(must(searchOpts{query: "f.o"}), "fzo") {
+		t.Error("literal f.o should not match fzo")
+	}
+	// Invalid regex surfaces an error.
+	if _, err := buildMatcher(searchOpts{query: "(", regex: true}); err == nil {
+		t.Error("expected an error for an invalid regex")
 	}
 }
 
