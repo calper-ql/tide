@@ -42,6 +42,11 @@ func shortenPath(p string, w int) string {
 }
 
 func (a *App) drawActivityBar(buf *tui.Buffer, r tui.Rect) {
+	// A separator down the right edge divides the buttons from the sidebar
+	// (and from the editor when the sidebar is collapsed).
+	for y := r.Y; y < r.Y+r.H; y++ {
+		buf.Set(r.X+r.W-1, y, '│', stBorder)
+	}
 	cx := r.X + (r.W-1)/2
 	for i, act := range activities {
 		y := r.Y + i

@@ -103,11 +103,12 @@ type App struct {
 	active  int    // index of the focused tab (invalid when no tabs)
 	browser *browser
 
-	tabFirst   int      // first tab drawn (strip scroll)
-	tabHits    []tabHit // drawn tab extents, for hit-testing
-	dragFrom   int      // tab being dragged, or -1
-	dragMoved  bool
-	pressClose int // tab whose close glyph was pressed, or -1
+	tabFirst    int      // first tab drawn (strip scroll)
+	tabMaxFirst int      // largest tabFirst that still reaches the last tab (no trailing gap)
+	tabHits     []tabHit // drawn tab extents, for hit-testing
+	dragFrom    int      // tab being dragged, or -1
+	dragMoved   bool
+	pressClose  int // tab whose close glyph was pressed, or -1
 
 	mdToggle tui.Rect // status-bar markdown viz/raw toggle, for hit-testing
 	teddyHit tui.Rect // the "teddy ▴" pill — opens the actions menu
@@ -197,6 +198,9 @@ func (a *App) handleKey(ev input.Event) {
 			return
 		case 's':
 			a.saveActive()
+			return
+		case 'r':
+			a.reloadActive()
 			return
 		case 'z':
 			if d != nil {
@@ -295,7 +299,7 @@ func (a *App) wheel(ev input.Event, delta int) {
 		if delta < 0 {
 			step = -1
 		}
-		a.tabFirst = clampInt(a.tabFirst+step, 0, max(len(a.tabs)-1, 0))
+		a.tabFirst = clampInt(a.tabFirst+step, 0, a.tabMaxFirst)
 		a.tabPinActive = false // honor the manual scroll; don't snap back to active
 		return
 	}

@@ -52,6 +52,35 @@ func TestSaveRoundTrip(t *testing.T) {
 	}
 }
 
+func TestReloadDiscardsChanges(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "f.txt")
+	if err := os.WriteFile(p, []byte("original\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d := newDoc(p, []byte("original\n"))
+	d.cx = 0
+	d.insertString("X") // dirty
+	if !d.modified() {
+		t.Fatal("expected modified before reload")
+	}
+	// File changes on disk; reload should adopt it and discard edits + undo.
+	if err := os.WriteFile(p, []byte("fromdisk\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.reload(); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if got := string(d.bytes()); got != "fromdisk\n" {
+		t.Errorf("after reload = %q, want \"fromdisk\\n\"", got)
+	}
+	if d.modified() {
+		t.Error("reloaded doc should be clean")
+	}
+	if len(d.undo) != 0 {
+		t.Error("reload should clear undo history")
+	}
+}
+
 func TestModifiedReflectsDiskState(t *testing.T) {
 	d := newDoc("f.txt", []byte("abc"))
 	if d.modified() {

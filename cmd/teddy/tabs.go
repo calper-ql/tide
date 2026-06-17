@@ -58,6 +58,14 @@ func (a *App) closeTab(i int) {
 	a.tabPinActive = true
 }
 
+// closeAllTabs closes every tab at once.
+func (a *App) closeAllTabs() {
+	a.tabs = nil
+	a.active = 0
+	a.tabFirst = 0
+	a.tabPinActive = true
+}
+
 // moveTab relocates the tab at from to index to (the drag-reorder primitive).
 func (a *App) moveTab(from, to int) {
 	if from == to || from < 0 || to < 0 || from >= len(a.tabs) || to >= len(a.tabs) {
@@ -107,7 +115,20 @@ func (a *App) drawTabStrip(buf *tui.Buffer, r tui.Rect) {
 		widths[i] = strWidth(segs[i]) + 1 // + separator
 	}
 
-	a.tabFirst = clampInt(a.tabFirst, 0, max(len(a.tabs)-1, 0))
+	// Cap the scroll so the trailing tabs always fill the strip: tabMaxFirst is
+	// the smallest start index whose suffix still fits, so you can't scroll
+	// past the last tab into empty space.
+	maxFirst, sum := 0, 0
+	for f := len(a.tabs) - 1; f >= 0; f-- {
+		sum += widths[f]
+		if sum > r.W {
+			maxFirst = f + 1
+			break
+		}
+	}
+	a.tabMaxFirst = min(maxFirst, len(a.tabs)-1)
+	a.tabFirst = clampInt(a.tabFirst, 0, a.tabMaxFirst)
+
 	// Snap the strip to reveal the active tab only when something just made it
 	// active; otherwise honor the manual wheel scroll.
 	if a.tabPinActive {
@@ -124,6 +145,7 @@ func (a *App) drawTabStrip(buf *tui.Buffer, r tui.Rect) {
 			}
 			a.tabFirst++
 		}
+		a.tabFirst = clampInt(a.tabFirst, 0, a.tabMaxFirst)
 		a.tabPinActive = false
 	}
 

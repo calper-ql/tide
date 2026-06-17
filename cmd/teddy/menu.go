@@ -19,6 +19,7 @@ func (a *App) menuActions() []menuItem {
 	d := a.activeDoc()
 	items := []menuItem{
 		{label: "Save", hint: "^S", enabled: d != nil && d.modified(), action: func(a *App) { a.saveActive() }},
+		{label: "Reload from disk", hint: "^R", enabled: d != nil, action: func(a *App) { a.reloadActive() }},
 	}
 	if d != nil && isMarkdown(d.path) {
 		label := "Show raw"
@@ -33,6 +34,7 @@ func (a *App) menuActions() []menuItem {
 	}
 	items = append(items,
 		menuItem{label: panel, hint: "^B", enabled: true, action: func(a *App) { a.sideCollapsed = !a.sideCollapsed }},
+		menuItem{label: "Close all tabs", enabled: len(a.tabs) > 0, action: func(a *App) { a.closeAllTabs() }},
 		menuItem{label: "Quit", hint: "^Q", enabled: true, action: func(a *App) { a.quit = true }},
 	)
 	return items

@@ -1,8 +1,11 @@
 package main
 
 import (
+	"fmt"
 	"path/filepath"
 	"testing"
+
+	"github.com/calper-ql/tide/internal/tui"
 )
 
 func TestOpenFileFocusesExisting(t *testing.T) {
@@ -77,6 +80,33 @@ func TestTabLabelsDisambiguate(t *testing.T) {
 		if got[i] != want[i] {
 			t.Errorf("label[%d] = %q, want %q", i, got[i], want[i])
 		}
+	}
+}
+
+func TestCloseAllTabs(t *testing.T) {
+	a := &App{tabs: []*doc{newDoc("a", nil), newDoc("b", nil)}, active: 1}
+	a.closeAllTabs()
+	if len(a.tabs) != 0 {
+		t.Errorf("tabs not cleared: %d remain", len(a.tabs))
+	}
+	if a.activeDoc() != nil {
+		t.Error("activeDoc should be nil after closing all tabs")
+	}
+}
+
+func TestTabScrollCapsAtLastTab(t *testing.T) {
+	a := &App{}
+	for i := 0; i < 12; i++ {
+		a.tabs = append(a.tabs, newDoc(fmt.Sprintf("/x/f%02d.go", i), nil))
+	}
+	buf := tui.NewBuffer(40, 1)
+	a.tabFirst = 999 // wildly over-scrolled
+	a.drawTabStrip(buf, tui.Rect{X: 0, Y: 0, W: 40, H: 1})
+	if a.tabFirst > a.tabMaxFirst {
+		t.Errorf("tabFirst %d exceeds cap %d — would leave trailing empty space", a.tabFirst, a.tabMaxFirst)
+	}
+	if a.tabMaxFirst >= len(a.tabs)-1 {
+		t.Errorf("tabMaxFirst %d should keep several trailing tabs visible (len %d)", a.tabMaxFirst, len(a.tabs))
 	}
 }
 

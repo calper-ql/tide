@@ -64,13 +64,39 @@ type doc struct {
 	modValid  bool // is modCached current?
 }
 
-func newDoc(path string, data []byte) *doc {
+func splitLines(data []byte) [][]rune {
 	parts := strings.Split(string(data), "\n")
 	lines := make([][]rune, len(parts))
 	for i, p := range parts {
 		lines[i] = []rune(p)
 	}
+	return lines
+}
+
+func newDoc(path string, data []byte) *doc {
+	lines := splitLines(data)
 	return &doc{path: path, lines: lines, savedLines: cloneLines(lines), preview: isMarkdown(path)}
+}
+
+// reload re-reads the file from disk, discarding unsaved changes and the undo
+// history. The cursor is clamped back into range.
+func (d *doc) reload() error {
+	if d.path == "" {
+		return os.ErrInvalid
+	}
+	data, err := os.ReadFile(d.path)
+	if err != nil {
+		return err
+	}
+	d.lines = splitLines(data)
+	d.savedLines = cloneLines(d.lines)
+	d.undo, d.redo = nil, nil
+	d.lastKind = kindNone
+	d.modValid = false
+	d.hlReady = false
+	d.previewTop = 0
+	d.clamp()
+	return nil
 }
 
 // modified reports whether the buffer differs from the on-disk baseline. It
@@ -527,6 +553,12 @@ func (d *doc) scrollToCursor() {
 func (a *App) saveActive() {
 	if d := a.activeDoc(); d != nil {
 		_ = d.save()
+	}
+}
+
+func (a *App) reloadActive() {
+	if d := a.activeDoc(); d != nil {
+		_ = d.reload()
 	}
 }
 
