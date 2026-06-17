@@ -159,9 +159,10 @@ highlighting, and a markdown raw/viz toggle.
 - Closing a tab discards its unsaved buffer without a prompt; no
   unsaved-buffer crash survival yet (the full-product acceptance test —
   teddy will self-checkpoint dirty buffers later).
-- No editor text selection / copy-paste-within yet (paste-in works); no
-  fuzzy open, search, or LSP (deferred per the ruling). Markdown tables
-  render as raw text.
+- Project-wide search is literal substring only (async, results capped at
+  1000, files >1MiB and binaries skipped); no regex or search-&-replace yet.
+  No editor text selection / copy-paste-within (paste-in works), no fuzzy
+  open, no LSP. Markdown tables render as raw text.
 - Re-lexes the whole buffer on edit; files past 10k lines render unhighlighted.
 
 `tide-git` follows teddy.

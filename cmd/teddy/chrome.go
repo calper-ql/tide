@@ -77,6 +77,8 @@ func (a *App) drawSidePanel(buf *tui.Buffer, r tui.Rect) {
 	switch a.selected {
 	case 0:
 		a.drawBrowser(buf, inner)
+	case 1:
+		a.drawSearch(buf, inner)
 	default:
 		drawIn(buf, inner, 1, 2, stHint, "not yet")
 	}

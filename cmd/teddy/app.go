@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+
 	"github.com/calper-ql/tide/internal/input"
 	"github.com/calper-ql/tide/internal/tui"
 )
@@ -25,7 +27,7 @@ type activity struct {
 
 var activities = []activity{
 	{"≣", "EXPLORER", true},
-	{"⚲", "SEARCH", false}, // enabled when the search panel lands
+	{"⚲", "SEARCH", true},
 	{"⎇", "SOURCE CONTROL", false},
 }
 
@@ -103,6 +105,11 @@ type App struct {
 	active  int    // index of the focused tab (invalid when no tabs)
 	browser *browser
 
+	search       searchState
+	searchCh     chan searchMsg
+	searchSeq    int
+	searchCancel context.CancelFunc
+
 	tabFirst    int      // first tab drawn (strip scroll)
 	tabMaxFirst int      // largest tabFirst that still reaches the last tab (no trailing gap)
 	tabHits     []tabHit // drawn tab extents, for hit-testing
@@ -137,14 +144,23 @@ func (a *App) Run() error {
 	if a.openArg != "" {
 		_ = a.openFile(a.openArg)
 	}
+	a.searchCh = make(chan searchMsg, 8)
 	events := a.screen.Events()
 	a.render()
 	for !a.quit {
-		a.handle(<-events)
+		select {
+		case ev := <-events:
+			a.handle(ev)
+		case msg := <-a.searchCh:
+			a.applySearch(msg)
+		}
+		// Coalesce any queued input + search results into one render.
 		for draining := true; draining; {
 			select {
 			case ev := <-events:
 				a.handle(ev)
+			case msg := <-a.searchCh:
+				a.applySearch(msg)
 			default:
 				draining = false
 			}
@@ -167,7 +183,9 @@ func (a *App) handle(ev tui.Event) {
 		case input.EvMouse:
 			a.handleMouse(ev.Input)
 		case input.EvPaste:
-			if d := a.activeDoc(); d != nil {
+			if a.searchActive() {
+				a.startSearch(a.search.query + string(ev.Input.Paste))
+			} else if d := a.activeDoc(); d != nil {
 				d.breakUndo()
 				d.insertString(string(ev.Input.Paste))
 				d.breakUndo()
@@ -192,6 +210,9 @@ func (a *App) handleKey(ev input.Event) {
 			return
 		case 'b':
 			a.sideCollapsed = !a.sideCollapsed
+			if a.sideCollapsed {
+				a.search.focused = false
+			}
 			return
 		case 'e':
 			a.togglePreview()
@@ -215,6 +236,10 @@ func (a *App) handleKey(ev input.Event) {
 			}
 			return
 		}
+	}
+	if a.searchActive() {
+		a.handleSearchKey(ev)
+		return
 	}
 	if d != nil {
 		d.handleKey(ev)
@@ -280,11 +305,17 @@ func (a *App) handleMouse(ev input.Event) {
 				a.selected = idx
 				a.sideCollapsed = false
 			}
+			a.search.focused = a.selected == 1 && !a.sideCollapsed
 		}
 		return
 	}
-	if a.selected == 0 && !a.sideCollapsed && a.last.side.Contains(ev.X, ev.Y) {
-		a.clickBrowser(ev.Y)
+	if !a.sideCollapsed && a.last.side.Contains(ev.X, ev.Y) {
+		switch a.selected {
+		case 0:
+			a.clickBrowser(ev.Y)
+		case 1:
+			a.clickSearch(ev.X, ev.Y)
+		}
 		return
 	}
 	if d := a.activeDoc(); d != nil && a.last.editor.Contains(ev.X, ev.Y) {
@@ -303,8 +334,13 @@ func (a *App) wheel(ev input.Event, delta int) {
 		a.tabPinActive = false // honor the manual scroll; don't snap back to active
 		return
 	}
-	if a.selected == 0 && !a.sideCollapsed && a.last.side.Contains(ev.X, ev.Y) {
-		a.browser.scroll(delta)
+	if !a.sideCollapsed && a.last.side.Contains(ev.X, ev.Y) {
+		switch a.selected {
+		case 0:
+			a.browser.scroll(delta)
+		case 1:
+			a.search.top = clampInt(a.search.top+delta, 0, max(len(a.search.results)-1, 0))
+		}
 		return
 	}
 	if d := a.activeDoc(); d != nil && a.last.editor.Contains(ev.X, ev.Y) {

@@ -607,9 +607,11 @@ func (a *App) drawEditor(buf *tui.Buffer, r tui.Rect) {
 		drawEditorLine(buf, r.X+gw, y, viewW, cells, d.left, stText, styles)
 	}
 
-	curCol := displayCol(d.line(), d.cx) - d.left
-	a.screen.SetCursor(r.X+gw+curCol, r.Y+(d.cy-d.top))
-	a.screen.ShowCursor()
+	if !a.searchActive() { // the search box owns the cursor when it's focused
+		curCol := displayCol(d.line(), d.cx) - d.left
+		a.screen.SetCursor(r.X+gw+curCol, r.Y+(d.cy-d.top))
+		a.screen.ShowCursor()
+	}
 }
 
 // drawMarkdown renders the doc as markdown viz (read-only): no gutter, no
