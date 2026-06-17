@@ -10,6 +10,8 @@ import (
 const (
 	activityW        = 3
 	defaultSideWidth = 28
+	minSideWidth     = 16
+	maxSideWidth     = 48
 )
 
 // activity is one button in the activity bar. Only Explorer is wired in T1;
@@ -60,9 +62,30 @@ func computeLayout(cols, rows, sideWidth int, collapsed bool) regions {
 		activity: tui.Rect{X: 0, Y: 0, W: aw, H: workH},
 		side:     tui.Rect{X: aw, Y: 0, W: sw, H: workH},
 		tabs:     tui.Rect{X: ex, Y: 0, W: ew, H: 1},
-		editor:   tui.Rect{X: ex, Y: 1, W: ew, H: max(workH-1, 0)},
+		editor:   tui.Rect{X: ex, Y: 2, W: ew, H: max(workH-2, 0)}, // row 1 is the tab/content rule
 		status:   tui.Rect{X: 0, Y: statusY, W: cols, H: 1},
 	}
+}
+
+// sidePanelWidth fits the explorer panel to its content — the widest of the
+// title, the root-folder line, and each visible tree row — clamped to a sane
+// range and at most half the screen. It is recomputed each frame, so the
+// panel grows and shrinks as folders expand. Other activities use the default.
+func (a *App) sidePanelWidth(cols int) int {
+	hi := max(min(maxSideWidth, cols/2), minSideWidth)
+	if a.selected != 0 {
+		return clampInt(defaultSideWidth, minSideWidth, hi)
+	}
+	w := strWidth(activities[a.selected].title) + 1 // title at dx 1
+	w = max(w, strWidth(a.browser.root.name)+2)     // "root/" at dx 1
+	for _, e := range a.browser.flat {
+		rw := 1 + e.depth*2 + 2 + strWidth(e.node.name) // dx + marker + name
+		if e.node.isDir {
+			rw++ // trailing slash
+		}
+		w = max(w, rw)
+	}
+	return clampInt(w+2, minSideWidth, hi) // + right pad + border column
 }
 
 // App is teddy's whole UI state.
@@ -73,7 +96,6 @@ type App struct {
 
 	selected      int // index into activities
 	sideCollapsed bool
-	sideWidth     int
 
 	openArg string // file named on the command line, opened at startup
 
@@ -94,7 +116,8 @@ type App struct {
 
 func newApp(scr *tui.Screen, root string) *App {
 	return &App{
-		screen: scr, root: root, sideWidth: defaultSideWidth,
+		screen:   scr,
+		root:     root,
 		browser:  newBrowser(root),
 		dragFrom: -1, pressClose: -1,
 	}
@@ -271,7 +294,7 @@ func (a *App) render() {
 	cols, rows := a.screen.Size()
 	buf.Clear(stText)
 
-	r := computeLayout(cols, rows, a.sideWidth, a.sideCollapsed)
+	r := computeLayout(cols, rows, a.sidePanelWidth(cols), a.sideCollapsed)
 	a.last = r
 
 	// Default to a hidden cursor; the editor shows it when a doc is focused.
@@ -281,6 +304,7 @@ func (a *App) render() {
 		a.drawSidePanel(buf, r.side)
 	}
 	a.drawTabStrip(buf, r.tabs)
+	a.drawTabSeparator(buf, r)
 	a.drawEditor(buf, r.editor)
 	a.drawStatusBar(buf, r.status)
 	_ = a.screen.Flush()

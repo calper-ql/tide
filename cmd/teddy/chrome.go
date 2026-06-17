@@ -77,6 +77,18 @@ func (a *App) drawSidePanel(buf *tui.Buffer, r tui.Rect) {
 	}
 }
 
+// drawTabSeparator draws the rule dividing the tab strip from the editor
+// content (the reserved row 1 of the editor column).
+func (a *App) drawTabSeparator(buf *tui.Buffer, r regions) {
+	y := r.tabs.Y + 1
+	if y >= r.status.Y || r.tabs.W <= 0 {
+		return
+	}
+	for x := r.tabs.X; x < r.tabs.X+r.tabs.W; x++ {
+		buf.Set(x, y, '─', stBorder)
+	}
+}
+
 func (a *App) drawStatusBar(buf *tui.Buffer, r tui.Rect) {
 	buf.Fill(r, ' ', stStatus)
 	x := drawIn(buf, r, 0, 0, stAccentPill, " teddy ")

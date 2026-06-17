@@ -20,14 +20,14 @@ func TestComputeLayoutNormal(t *testing.T) {
 	if r.editor.W != 100-(activityW+28) {
 		t.Errorf("editor width = %d, want %d", r.editor.W, 100-(activityW+28))
 	}
-	if r.editor.Y != 1 || r.tabs.Y != 0 || r.tabs.H != 1 {
-		t.Errorf("tab strip / editor stacking wrong: tabs=%+v editor=%+v", r.tabs, r.editor)
+	if r.tabs.Y != 0 || r.tabs.H != 1 || r.editor.Y != 2 {
+		t.Errorf("tab strip / separator / editor stacking wrong: tabs=%+v editor=%+v", r.tabs, r.editor)
 	}
 	if r.status.Y != 29 || r.status.W != 100 {
 		t.Errorf("status bar = %+v, want full-width row 29", r.status)
 	}
-	if r.editor.H != 28 { // workH 29 minus the 1-row tab strip
-		t.Errorf("editor height = %d, want 28", r.editor.H)
+	if r.editor.H != 27 { // workH 29 minus the tab strip and the separator row
+		t.Errorf("editor height = %d, want 27", r.editor.H)
 	}
 }
 

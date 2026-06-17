@@ -29,7 +29,7 @@ var (
 	stGutterActive = tui.DefaultStyle.WithFG(tui.Cyan)
 
 	stSelected = tui.DefaultStyle.Reversed() // selected browser row (full-width bar)
-	stDir      = tui.DefaultStyle.WithFG(tui.Blue)
+	stDir      = tui.DefaultStyle.WithFG(tui.BrightBlue)
 
 	// syntax highlighting: chroma categories mapped onto the 16-color palette
 	stHlKeyword = tui.DefaultStyle.WithFG(tui.Magenta)

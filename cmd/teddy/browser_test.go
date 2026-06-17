@@ -60,6 +60,27 @@ func TestBrowserOpensFile(t *testing.T) {
 	}
 }
 
+func TestSidePanelWidthFitsContent(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "short.txt"))
+	a := &App{selected: 0, browser: newBrowser(dir)}
+	narrow := a.sidePanelWidth(200)
+	if narrow < minSideWidth {
+		t.Errorf("width %d below min %d", narrow, minSideWidth)
+	}
+
+	long := "a_very_long_file_name_that_exceeds_the_default_width.txt"
+	mustWrite(t, filepath.Join(dir, long))
+	a.browser = newBrowser(dir)
+	wide := a.sidePanelWidth(200)
+	if wide <= narrow {
+		t.Errorf("width did not grow for a long name: %d <= %d", wide, narrow)
+	}
+	if wide > maxSideWidth {
+		t.Errorf("width %d exceeds max %d", wide, maxSideWidth)
+	}
+}
+
 func names(b *browser) []string {
 	out := make([]string, len(b.flat))
 	for i, e := range b.flat {
