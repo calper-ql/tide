@@ -76,7 +76,9 @@ type App struct {
 	sideCollapsed bool
 	sideWidth     int
 
-	openArg string // file named on the command line, opened at startup (editor task)
+	openArg string // file named on the command line, opened at startup
+
+	doc *doc // the open document (a single buffer in T1; tabs generalize this)
 
 	last regions // geometry from the last render, for mouse hit-testing
 }
@@ -88,6 +90,9 @@ func newApp(scr *tui.Screen, root string) *App {
 // Run drives the event loop until quit, coalescing bursts of events into one
 // render so mouse-motion and paste floods don't repaint per byte.
 func (a *App) Run() error {
+	if a.openArg != "" {
+		_ = a.openFile(a.openArg)
+	}
 	events := a.screen.Events()
 	a.render()
 	for !a.quit {
@@ -117,25 +122,70 @@ func (a *App) handle(ev tui.Event) {
 			a.handleKey(ev.Input)
 		case input.EvMouse:
 			a.handleMouse(ev.Input)
+		case input.EvPaste:
+			if d := a.activeDoc(); d != nil {
+				d.breakUndo()
+				d.insertString(string(ev.Input.Paste))
+				d.breakUndo()
+				d.scrollToCursor()
+			}
 		}
 	}
 }
 
 func (a *App) handleKey(ev input.Event) {
+	d := a.activeDoc()
 	if ev.Mods&input.Ctrl != 0 && ev.Key == input.KeyRune {
 		switch ev.Rune {
 		case 'q':
 			a.quit = true
+			return
 		case 'b':
 			a.sideCollapsed = !a.sideCollapsed
+			return
+		case 's':
+			a.saveActive()
+			return
+		case 'z':
+			if d != nil {
+				d.Undo()
+				d.scrollToCursor()
+			}
+			return
+		case 'y':
+			if d != nil {
+				d.Redo()
+				d.scrollToCursor()
+			}
+			return
 		}
+	}
+	if d != nil {
+		d.handleKey(ev)
+		d.scrollToCursor()
 	}
 }
 
 func (a *App) handleMouse(ev input.Event) {
-	if ev.Mouse != input.MousePress || ev.Button != 1 {
+	switch ev.Mouse {
+	case input.MouseWheelUp:
+		if d := a.activeDoc(); d != nil && a.last.editor.Contains(ev.X, ev.Y) {
+			d.top = max(d.top-3, 0)
+		}
+		return
+	case input.MouseWheelDown:
+		if d := a.activeDoc(); d != nil && a.last.editor.Contains(ev.X, ev.Y) {
+			d.top = clampInt(d.top+3, 0, max(len(d.lines)-1, 0))
+		}
+		return
+	case input.MousePress:
+		if ev.Button != 1 {
+			return
+		}
+	default:
 		return
 	}
+
 	// Activity bar: each icon sits on its own row at the top of the strip.
 	if a.last.activity.Contains(ev.X, ev.Y) {
 		idx := ev.Y - a.last.activity.Y
@@ -147,7 +197,23 @@ func (a *App) handleMouse(ev input.Event) {
 				a.sideCollapsed = false
 			}
 		}
+		return
 	}
+	if d := a.activeDoc(); d != nil && a.last.editor.Contains(ev.X, ev.Y) {
+		a.clickEditor(d, ev.X, ev.Y)
+	}
+}
+
+// clickEditor places the cursor at the clicked cell, mapping through the
+// gutter, scroll offsets, and tab/wide-rune expansion.
+func (a *App) clickEditor(d *doc, x, y int) {
+	r := a.last.editor
+	gw := gutterWidth(len(d.lines))
+	d.cy = clampInt(d.top+(y-r.Y), 0, len(d.lines)-1)
+	dc := max((x-r.X-gw)+d.left, 0)
+	d.cx = colFromDisplay(d.line(), dc)
+	d.breakUndo()
+	d.setGoal()
 }
 
 func (a *App) render() {
@@ -158,6 +224,8 @@ func (a *App) render() {
 	r := computeLayout(cols, rows, a.sideWidth, a.sideCollapsed)
 	a.last = r
 
+	// Default to a hidden cursor; the editor shows it when a doc is focused.
+	a.screen.HideCursor()
 	a.drawActivityBar(buf, r.activity)
 	if !a.sideCollapsed {
 		a.drawSidePanel(buf, r.side)
@@ -165,8 +233,5 @@ func (a *App) render() {
 	a.drawTabStrip(buf, r.tabs)
 	a.drawEditor(buf, r.editor)
 	a.drawStatusBar(buf, r.status)
-
-	// Nothing owns a text cursor yet (the editor will); keep it hidden.
-	a.screen.HideCursor()
 	_ = a.screen.Flush()
 }

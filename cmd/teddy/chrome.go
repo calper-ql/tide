@@ -1,6 +1,8 @@
 package main
 
 import (
+	"fmt"
+
 	"github.com/mattn/go-runewidth"
 
 	"github.com/calper-ql/tide/internal/tui"
@@ -82,25 +84,23 @@ func (a *App) drawTabStrip(buf *tui.Buffer, r tui.Rect) {
 	_ = r
 }
 
-func (a *App) drawEditor(buf *tui.Buffer, r tui.Rect) {
-	if r.W <= 0 || r.H <= 0 {
-		return
-	}
-	msg := "teddy — open a file from the explorer"
-	y := r.H / 2
-	x := max((r.W-strWidth(msg))/2, 0)
-	drawIn(buf, r, x, y, stHint, msg)
-}
-
 func (a *App) drawStatusBar(buf *tui.Buffer, r tui.Rect) {
 	buf.Fill(r, ' ', stStatus)
 	x := drawIn(buf, r, 0, 0, stAccentPill, " teddy ")
-	root := shortenPath(a.root, max(r.W/2, 8))
-	drawIn(buf, r, x-r.X+1, 0, stStatusDim, root)
+	root := shortenPath(a.root, max(r.W/3, 8))
+	x = drawIn(buf, r, x-r.X+1, 0, stStatusDim, root)
 
-	hint := "^B panel   ^Q quit "
-	hx := r.W - strWidth(hint)
-	if hx > (x-r.X)+strWidth(root)+2 {
-		drawIn(buf, r, hx, 0, stStatusDim, hint)
+	// Right side: cursor position + dirty marker when a doc is open, else hints.
+	right := "^S save  ^B panel  ^Q quit "
+	if d := a.activeDoc(); d != nil {
+		mark := ""
+		if d.dirty {
+			mark = " ●"
+		}
+		right = fmt.Sprintf("Ln %d, Col %d%s ", d.cy+1, d.cx+1, mark)
+	}
+	hx := r.W - strWidth(right)
+	if hx > (x-r.X)+2 {
+		drawIn(buf, r, hx, 0, stStatusDim, right)
 	}
 }

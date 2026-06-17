@@ -24,4 +24,7 @@ var (
 	stTab       = tui.DefaultStyle.Fainted()
 	stTabActive = tui.DefaultStyle.WithFG(tui.Cyan).Bolded()
 	stDirty     = tui.DefaultStyle.WithFG(tui.Yellow)
+
+	stGutter       = tui.DefaultStyle.Fainted()
+	stGutterActive = tui.DefaultStyle.WithFG(tui.Cyan)
 )
