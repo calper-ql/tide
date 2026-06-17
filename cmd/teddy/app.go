@@ -8,7 +8,7 @@ import (
 // activityW is the fixed width of the far-left activity bar (VS Code's
 // vertical icon strip). defaultSideWidth is the explorer panel's width.
 const (
-	activityW        = 3
+	activityW        = 4 // icon column + a gap before the right-edge separator
 	defaultSideWidth = 28
 	minSideWidth     = 16
 	maxSideWidth     = 48
@@ -24,8 +24,8 @@ type activity struct {
 }
 
 var activities = []activity{
-	{"▤", "EXPLORER", true},
-	{"⌕", "SEARCH", false},
+	{"≣", "EXPLORER", true},
+	{"⚲", "SEARCH", false}, // enabled when the search panel lands
 	{"⎇", "SOURCE CONTROL", false},
 }
 
