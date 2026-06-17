@@ -394,20 +394,6 @@ func (d *doc) scrollToCursor() {
 
 // --- App integration ---
 
-func (a *App) activeDoc() *doc { return a.doc }
-
-func (a *App) openFile(path string) error {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if !os.IsNotExist(err) {
-			return err
-		}
-		data = nil // opening a not-yet-created file
-	}
-	a.doc = newDoc(path, data)
-	return nil
-}
-
 func (a *App) saveActive() {
 	if d := a.activeDoc(); d != nil {
 		_ = d.save()

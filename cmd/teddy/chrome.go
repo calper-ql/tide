@@ -77,13 +77,6 @@ func (a *App) drawSidePanel(buf *tui.Buffer, r tui.Rect) {
 	}
 }
 
-func (a *App) drawTabStrip(buf *tui.Buffer, r tui.Rect) {
-	// No tabs yet; the strip is filled by the tabs task. Kept blank so the
-	// editor area reads as empty rather than mislabeled.
-	_ = buf
-	_ = r
-}
-
 func (a *App) drawStatusBar(buf *tui.Buffer, r tui.Rect) {
 	buf.Fill(r, ' ', stStatus)
 	x := drawIn(buf, r, 0, 0, stAccentPill, " teddy ")

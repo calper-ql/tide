@@ -10,7 +10,6 @@ import (
 const (
 	activityW        = 3
 	defaultSideWidth = 28
-	minSideWidth     = 14
 )
 
 // activity is one button in the activity bar. Only Explorer is wired in T1;
@@ -78,14 +77,25 @@ type App struct {
 
 	openArg string // file named on the command line, opened at startup
 
-	doc     *doc     // the open document (a single buffer in T1; tabs generalize this)
-	browser *browser // explorer file tree
+	tabs    []*doc // open documents, one per tab
+	active  int    // index of the focused tab (invalid when no tabs)
+	browser *browser
+
+	tabFirst   int      // first tab drawn (strip scroll)
+	tabHits    []tabHit // drawn tab extents, for hit-testing
+	dragFrom   int      // tab being dragged, or -1
+	dragMoved  bool
+	pressClose int // tab whose close glyph was pressed, or -1
 
 	last regions // geometry from the last render, for mouse hit-testing
 }
 
 func newApp(scr *tui.Screen, root string) *App {
-	return &App{screen: scr, root: root, sideWidth: defaultSideWidth, browser: newBrowser(root)}
+	return &App{
+		screen: scr, root: root, sideWidth: defaultSideWidth,
+		browser:  newBrowser(root),
+		dragFrom: -1, pressClose: -1,
+	}
 }
 
 // Run drives the event loop until quit, coalescing bursts of events into one
@@ -175,6 +185,14 @@ func (a *App) handleMouse(ev input.Event) {
 	case input.MouseWheelDown:
 		a.wheel(ev, 3)
 		return
+	case input.MouseMotion:
+		if a.dragFrom >= 0 {
+			a.dragTab(ev.X)
+		}
+		return
+	case input.MouseRelease:
+		a.releaseTab(ev)
+		return
 	case input.MousePress:
 		if ev.Button != 1 {
 			return
@@ -183,6 +201,13 @@ func (a *App) handleMouse(ev input.Event) {
 		return
 	}
 
+	// A fresh left-press: clear any stale tab-drag arming.
+	a.dragFrom, a.pressClose = -1, -1
+
+	if a.last.tabs.Contains(ev.X, ev.Y) {
+		a.pressTab(ev.X)
+		return
+	}
 	// Activity bar: each icon sits on its own row at the top of the strip.
 	if a.last.activity.Contains(ev.X, ev.Y) {
 		idx := ev.Y - a.last.activity.Y
