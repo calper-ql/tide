@@ -1,0 +1,175 @@
+package main
+
+import (
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+
+	"github.com/calper-ql/tide/internal/tui"
+)
+
+// treeNode is one entry in the file browser. Directories load their children
+// lazily on first expand, so opening teddy on a huge tree is cheap.
+type treeNode struct {
+	name     string
+	path     string
+	isDir    bool
+	expanded bool
+	loaded   bool
+	children []*treeNode
+}
+
+// flatEntry is one visible row: a node plus its indentation depth. The flat
+// list is the render + hit-test order, rebuilt whenever the tree changes.
+type flatEntry struct {
+	node  *treeNode
+	depth int
+}
+
+type browser struct {
+	root *treeNode
+	flat []flatEntry
+	top  int // scroll offset (index of the first visible row)
+	sel  int // selected row
+
+	contentY int // absolute screen y of the first tree row (set on render)
+	viewRows int
+}
+
+func newBrowser(root string) *browser {
+	b := &browser{root: &treeNode{name: filepath.Base(root), path: root, isDir: true, expanded: true}}
+	b.load(b.root)
+	b.reflatten()
+	return b
+}
+
+// load reads a directory's entries once, sorted dirs-first then
+// case-insensitively, skipping .git (noise, never edited here).
+func (b *browser) load(n *treeNode) {
+	if n.loaded || !n.isDir {
+		return
+	}
+	n.loaded = true
+	entries, err := os.ReadDir(n.path)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.Name() == ".git" {
+			continue
+		}
+		n.children = append(n.children, &treeNode{
+			name:  e.Name(),
+			path:  filepath.Join(n.path, e.Name()),
+			isDir: e.IsDir(),
+		})
+	}
+	sort.Slice(n.children, func(i, j int) bool {
+		a, c := n.children[i], n.children[j]
+		if a.isDir != c.isDir {
+			return a.isDir
+		}
+		return strings.ToLower(a.name) < strings.ToLower(c.name)
+	})
+}
+
+// reflatten rebuilds the visible-row list from the expanded tree.
+func (b *browser) reflatten() {
+	b.flat = b.flat[:0]
+	var walk func(nodes []*treeNode, depth int)
+	walk = func(nodes []*treeNode, depth int) {
+		for _, n := range nodes {
+			b.flat = append(b.flat, flatEntry{n, depth})
+			if n.isDir && n.expanded {
+				walk(n.children, depth+1)
+			}
+		}
+	}
+	walk(b.root.children, 0)
+	b.sel = clampInt(b.sel, 0, max(len(b.flat)-1, 0))
+}
+
+// activate handles a click on row idx: toggle a directory (loading it on
+// first open), or open a file through the supplied callback.
+func (b *browser) activate(idx int, open func(string) error) {
+	if idx < 0 || idx >= len(b.flat) {
+		return
+	}
+	b.sel = idx
+	n := b.flat[idx].node
+	if n.isDir {
+		if n.expanded {
+			n.expanded = false
+		} else {
+			b.load(n)
+			n.expanded = true
+		}
+		b.reflatten()
+		return
+	}
+	_ = open(n.path)
+}
+
+func (b *browser) scroll(delta int) {
+	b.top = clampInt(b.top+delta, 0, max(len(b.flat)-1, 0))
+}
+
+func (a *App) drawBrowser(buf *tui.Buffer, inner tui.Rect) {
+	b := a.browser
+	// row 0 is the panel title (drawn by drawSidePanel); row 1 the workspace
+	// folder name; the tree starts at row 2.
+	drawIn(buf, inner, 1, 1, stDim, b.root.name+"/")
+	const listTop = 2
+	rows := inner.H - listTop
+	if rows < 1 {
+		return
+	}
+	b.viewRows = rows
+	b.contentY = inner.Y + listTop
+
+	// Keep the selected row visible.
+	if b.sel < b.top {
+		b.top = b.sel
+	}
+	if b.sel >= b.top+rows {
+		b.top = b.sel - rows + 1
+	}
+	b.top = clampInt(b.top, 0, max(len(b.flat)-rows, 0))
+
+	for i := 0; i < rows; i++ {
+		idx := b.top + i
+		if idx >= len(b.flat) {
+			break
+		}
+		e := b.flat[idx]
+		y := listTop + i
+		st := stText
+		if e.node.isDir {
+			st = stDir
+		}
+		if idx == b.sel {
+			buf.Fill(tui.Rect{X: inner.X, Y: inner.Y + y, W: inner.W, H: 1}, ' ', stSelected)
+			st = stSelected
+		}
+		marker := "  "
+		if e.node.isDir {
+			if e.node.expanded {
+				marker = "▾ "
+			} else {
+				marker = "▸ "
+			}
+		}
+		name := e.node.name
+		if e.node.isDir {
+			name += "/"
+		}
+		drawIn(buf, inner, 1+e.depth*2, y, st, marker+name)
+	}
+}
+
+// clickBrowser maps a click in the side panel to a tree row and activates it.
+func (a *App) clickBrowser(y int) {
+	idx := a.browser.top + (y - a.browser.contentY)
+	a.browser.activate(idx, a.openFile)
+}

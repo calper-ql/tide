@@ -71,7 +71,7 @@ func (a *App) drawSidePanel(buf *tui.Buffer, r tui.Rect) {
 
 	switch a.selected {
 	case 0:
-		drawIn(buf, inner, 1, 2, stHint, "(file browser)") // replaced by the browser task
+		a.drawBrowser(buf, inner)
 	default:
 		drawIn(buf, inner, 1, 2, stHint, "not yet")
 	}

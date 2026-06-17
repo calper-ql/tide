@@ -78,13 +78,14 @@ type App struct {
 
 	openArg string // file named on the command line, opened at startup
 
-	doc *doc // the open document (a single buffer in T1; tabs generalize this)
+	doc     *doc     // the open document (a single buffer in T1; tabs generalize this)
+	browser *browser // explorer file tree
 
 	last regions // geometry from the last render, for mouse hit-testing
 }
 
 func newApp(scr *tui.Screen, root string) *App {
-	return &App{screen: scr, root: root, sideWidth: defaultSideWidth}
+	return &App{screen: scr, root: root, sideWidth: defaultSideWidth, browser: newBrowser(root)}
 }
 
 // Run drives the event loop until quit, coalescing bursts of events into one
@@ -169,14 +170,10 @@ func (a *App) handleKey(ev input.Event) {
 func (a *App) handleMouse(ev input.Event) {
 	switch ev.Mouse {
 	case input.MouseWheelUp:
-		if d := a.activeDoc(); d != nil && a.last.editor.Contains(ev.X, ev.Y) {
-			d.top = max(d.top-3, 0)
-		}
+		a.wheel(ev, -3)
 		return
 	case input.MouseWheelDown:
-		if d := a.activeDoc(); d != nil && a.last.editor.Contains(ev.X, ev.Y) {
-			d.top = clampInt(d.top+3, 0, max(len(d.lines)-1, 0))
-		}
+		a.wheel(ev, 3)
 		return
 	case input.MousePress:
 		if ev.Button != 1 {
@@ -199,8 +196,23 @@ func (a *App) handleMouse(ev input.Event) {
 		}
 		return
 	}
+	if a.selected == 0 && !a.sideCollapsed && a.last.side.Contains(ev.X, ev.Y) {
+		a.clickBrowser(ev.Y)
+		return
+	}
 	if d := a.activeDoc(); d != nil && a.last.editor.Contains(ev.X, ev.Y) {
 		a.clickEditor(d, ev.X, ev.Y)
+	}
+}
+
+// wheel scrolls whichever panel the pointer is over.
+func (a *App) wheel(ev input.Event, delta int) {
+	if a.selected == 0 && !a.sideCollapsed && a.last.side.Contains(ev.X, ev.Y) {
+		a.browser.scroll(delta)
+		return
+	}
+	if d := a.activeDoc(); d != nil && a.last.editor.Contains(ev.X, ev.Y) {
+		d.top = clampInt(d.top+delta, 0, max(len(d.lines)-1, 0))
 	}
 }
 

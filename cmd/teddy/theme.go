@@ -27,4 +27,7 @@ var (
 
 	stGutter       = tui.DefaultStyle.Fainted()
 	stGutterActive = tui.DefaultStyle.WithFG(tui.Cyan)
+
+	stSelected = tui.DefaultStyle.Reversed() // selected browser row (full-width bar)
+	stDir      = tui.DefaultStyle.WithFG(tui.Blue)
 )
