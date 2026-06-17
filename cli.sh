@@ -53,8 +53,8 @@ shift || true
 case "$cmd" in
 build)
   need_docker
-  run env GOOS="$HOST_GOOS" GOARCH="$HOST_GOARCH" go build -o bin/tide ./cmd/tide
-  echo "built bin/tide ($HOST_GOOS/$HOST_GOARCH)"
+  run env GOOS="$HOST_GOOS" GOARCH="$HOST_GOARCH" go build -o bin/ ./cmd/tide ./cmd/teddy
+  echo "built bin/tide and bin/teddy ($HOST_GOOS/$HOST_GOARCH)"
   ;;
 test)
   need_docker

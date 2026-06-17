@@ -1,7 +1,7 @@
 # tide — current state
 
 *Living document; update at the end of each increment.*
-*Last updated 2026-06-11 (HEAD `643941b`). Product contract: [tide-spec-v1.md](tide-spec-v1.md).*
+*Last updated 2026-06-17 (teddy T1). Product contract: [tide-spec-v1.md](tide-spec-v1.md).*
 
 ## Where we are
 
@@ -140,14 +140,28 @@ browser, draggable editor tabs labeled by path, a single editor/viewer area
 (tide owns tiling), minimal editing with Ctrl+S/undo, chroma syntax
 highlighting, and a markdown raw/viz toggle.
 
-- **T1 (in progress)** — teddy standalone: the chrome, browser, tabs
-  (in-strip reorder), minimal editing, highlighting, markdown viz. Reuses
-  `internal/input` and the 16-color palette. UX-exploration increment: felt
-  before the deep audit.
-- **T2** — the cross-tide tab drag: a tab dragged out of teddy is delivered
-  through tide (tear-off to a new pane, drop onto another teddy, or path
-  paste into a terminal). Adds the first tool-facing protocol surface
+- **T1 (done)** — teddy standalone, built on `internal/tui` (a small
+  cell-grid + diff renderer reusing `internal/input` and the 16-color
+  palette) and `internal/highlight` (chroma as a lexer only). Ships the
+  activity bar + collapsible file tree, draggable path-labeled tabs with
+  in-strip reorder, a minimal editor (edit/save/undo, gutter, tab expansion,
+  wide glyphs, click + wheel), syntax highlighting, and a markdown raw/viz
+  toggle. `cli.sh build` produces `bin/teddy` alongside `bin/tide`; CI is
+  `-race` green. UX-exploration increment: deep adversarial audit deferred
+  until the feel is validated.
+- **T2 (next)** — the cross-tide tab drag: a tab dragged out of teddy is
+  delivered through tide (tear-off to a new pane, drop onto another teddy, or
+  path paste into a terminal). Adds the first tool-facing protocol surface
   (`tool_attach`, `drag_start`/`drag_drop`, `open`) and a
   spawn-pane-with-command daemon capability.
+
+### teddy T1 known limits (accepted, to revisit)
+- Closing a tab discards its unsaved buffer without a prompt; no
+  unsaved-buffer crash survival yet (the full-product acceptance test —
+  teddy will self-checkpoint dirty buffers later).
+- No editor text selection / copy-paste-within yet (paste-in works); no
+  fuzzy open, search, or LSP (deferred per the ruling). Markdown tables
+  render as raw text.
+- Re-lexes the whole buffer on edit; files past 10k lines render unhighlighted.
 
 `tide-git` follows teddy.
