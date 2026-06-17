@@ -7,11 +7,17 @@ import (
 
 	"github.com/mattn/go-runewidth"
 
+	"github.com/calper-ql/tide/internal/highlight"
 	"github.com/calper-ql/tide/internal/input"
 	"github.com/calper-ql/tide/internal/tui"
 )
 
-const tabWidth = 4
+const (
+	tabWidth = 4
+	// maxHighlightLines caps re-lexing cost: bigger files render unhighlighted
+	// rather than re-lex the whole buffer on every keystroke.
+	maxHighlightLines = 10000
+)
 
 // editKind groups consecutive edits of the same sort into one undo step, so
 // a run of typing undoes as a unit rather than a character at a time.
@@ -50,6 +56,9 @@ type doc struct {
 
 	preview    bool // markdown viz vs raw (only meaningful for .md)
 	previewTop int  // viz scroll offset
+
+	hlLines [][]highlight.Span // cached per-line syntax spans
+	hlReady bool               // false when hlLines needs recomputing
 }
 
 func newDoc(path string, data []byte) *doc {
@@ -106,6 +115,7 @@ func (d *doc) beginEdit(kind editKind) {
 	}
 	d.lastKind = kind
 	d.dirty = true
+	d.hlReady = false
 }
 
 // breakUndo ends the current run so the next edit starts a fresh undo step
@@ -122,6 +132,7 @@ func (d *doc) Undo() {
 	d.lines, d.cx, d.cy = s.lines, s.cx, s.cy
 	d.lastKind = kindNone
 	d.dirty = true
+	d.hlReady = false
 	d.clamp()
 }
 
@@ -135,6 +146,7 @@ func (d *doc) Redo() {
 	d.lines, d.cx, d.cy = s.lines, s.cx, s.cy
 	d.lastKind = kindNone
 	d.dirty = true
+	d.hlReady = false
 	d.clamp()
 }
 
@@ -341,32 +353,110 @@ func runeCells(r rune, col int) int {
 // control characters show as a middle dot. The result indexes by display
 // column, which is what horizontal scrolling and drawing slice on.
 func expandLine(line []rune) []rune {
-	out := make([]rune, 0, len(line))
+	cells, _ := expandStyled(line, nil)
+	return cells
+}
+
+// expandStyled turns a logical line into display cells and, when cats is
+// non-nil (one category per source rune), a parallel per-cell style slice.
+// Tabs expand to the next stop, wide runes get a 0 continuation cell, control
+// chars show as a dot — and every emitted cell inherits its source rune's
+// style, so highlighting survives expansion.
+func expandStyled(line []rune, cats []highlight.Category) ([]rune, []tui.Style) {
+	cells := make([]rune, 0, len(line))
+	var styles []tui.Style
+	if cats != nil {
+		styles = make([]tui.Style, 0, len(line))
+	}
+	add := func(r rune, st tui.Style) {
+		cells = append(cells, r)
+		if styles != nil {
+			styles = append(styles, st)
+		}
+	}
 	col := 0
-	for _, r := range line {
+	for i, r := range line {
+		st := stText
+		if cats != nil && i < len(cats) {
+			st = catStyle(cats[i])
+		}
 		switch {
 		case r == '\t':
 			n := tabWidth - col%tabWidth
-			for i := 0; i < n; i++ {
-				out = append(out, ' ')
+			for k := 0; k < n; k++ {
+				add(' ', st)
 			}
 			col += n
 		case r < 0x20 || r == 0x7f:
-			out = append(out, '·')
+			add('·', st)
 			col++
 		default:
 			w := runewidth.RuneWidth(r)
 			if w < 1 {
 				w = 1
 			}
-			out = append(out, r)
+			add(r, st)
 			if w == 2 {
-				out = append(out, 0)
+				add(0, st)
 			}
 			col += w
 		}
 	}
-	return out
+	return cells, styles
+}
+
+// ensureHighlight re-lexes the buffer when it has changed, skipping files too
+// large to re-lex per keystroke (they render unhighlighted).
+func (d *doc) ensureHighlight() {
+	if d.hlReady {
+		return
+	}
+	d.hlReady = true
+	if len(d.lines) > maxHighlightLines {
+		d.hlLines = nil
+		return
+	}
+	d.hlLines = highlight.Lines(d.path, string(d.bytes()))
+}
+
+// lineCats returns one syntax Category per source rune of line ln, or nil
+// when the line is unhighlighted. Spans for a line reconstruct that line
+// exactly (highlight's round-trip invariant), so runes align by position.
+func (d *doc) lineCats(ln int) []highlight.Category {
+	if d.hlLines == nil || ln >= len(d.hlLines) {
+		return nil
+	}
+	cats := make([]highlight.Category, len(d.lines[ln]))
+	idx := 0
+	for _, sp := range d.hlLines[ln] {
+		for range sp.Text {
+			if idx < len(cats) {
+				cats[idx] = sp.Cat
+			}
+			idx++
+		}
+	}
+	return cats
+}
+
+func catStyle(c highlight.Category) tui.Style {
+	switch c {
+	case highlight.CatKeyword:
+		return stHlKeyword
+	case highlight.CatBuiltin:
+		return stHlBuiltin
+	case highlight.CatType:
+		return stHlType
+	case highlight.CatString:
+		return stHlString
+	case highlight.CatNumber:
+		return stHlNumber
+	case highlight.CatComment:
+		return stHlComment
+	case highlight.CatError:
+		return stHlError
+	}
+	return stText
 }
 
 // clampScroll bounds the scroll offsets without forcing the cursor into
@@ -433,6 +523,7 @@ func (a *App) drawEditor(buf *tui.Buffer, r tui.Rect) {
 	}
 	d.viewW, d.viewH = viewW, r.H
 	d.clampScroll()
+	d.ensureHighlight()
 
 	for row := 0; row < r.H; row++ {
 		ln := d.top + row
@@ -447,8 +538,7 @@ func (a *App) drawEditor(buf *tui.Buffer, r tui.Rect) {
 		num := strconv.Itoa(ln + 1)
 		drawIn(buf, tui.Rect{X: r.X, Y: y, W: gw, H: 1}, gw-1-len(num), 0, gst, num)
 
-		cells := expandLine(d.lines[ln])
-		styles := a.lineStyles(d, ln, cells)
+		cells, styles := expandStyled(d.lines[ln], d.lineCats(ln))
 		drawEditorLine(buf, r.X+gw, y, viewW, cells, d.left, stText, styles)
 	}
 
@@ -474,13 +564,6 @@ func (a *App) drawMarkdown(buf *tui.Buffer, r tui.Rect, d *doc) {
 		}
 		drawMdLine(buf, r.X+1, r.Y+i, width, lines[li])
 	}
-}
-
-// lineStyles returns a per-display-cell style slice for one line, or nil for
-// a uniform line. Syntax highlighting (task #8) fills this in; until then
-// every line is uniform.
-func (a *App) lineStyles(d *doc, ln int, cells []rune) []tui.Style {
-	return nil
 }
 
 // drawEditorLine paints one line's display cells through the horizontal

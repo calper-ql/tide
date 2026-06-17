@@ -31,6 +31,15 @@ var (
 	stSelected = tui.DefaultStyle.Reversed() // selected browser row (full-width bar)
 	stDir      = tui.DefaultStyle.WithFG(tui.Blue)
 
+	// syntax highlighting: chroma categories mapped onto the 16-color palette
+	stHlKeyword = tui.DefaultStyle.WithFG(tui.Magenta)
+	stHlString  = tui.DefaultStyle.WithFG(tui.Green)
+	stHlNumber  = tui.DefaultStyle.WithFG(tui.Red)
+	stHlComment = tui.DefaultStyle.Fainted()
+	stHlType    = tui.DefaultStyle.WithFG(tui.Yellow)
+	stHlBuiltin = tui.DefaultStyle.WithFG(tui.Cyan)
+	stHlError   = tui.DefaultStyle.WithFG(tui.BrightRed)
+
 	// markdown viz
 	stMdHeading = tui.DefaultStyle.WithFG(tui.Cyan).Bolded()
 	stMdCode    = tui.DefaultStyle.WithFG(tui.Green)

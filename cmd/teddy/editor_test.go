@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/calper-ql/tide/internal/highlight"
 )
 
 func TestInsertAndSerialize(t *testing.T) {
@@ -77,6 +79,33 @@ func TestDisplayColAndInverse(t *testing.T) {
 	}
 	if got := colFromDisplay(line, 4); got != 2 {
 		t.Errorf("colFromDisplay(4) = %d, want 2 (the 'b')", got)
+	}
+}
+
+func TestHighlightLineCats(t *testing.T) {
+	d := newDoc("main.go", []byte("package main\n"))
+	d.ensureHighlight()
+	cats := d.lineCats(0)
+	if cats == nil {
+		t.Fatal("no syntax categories for a .go line")
+	}
+	if len(cats) != len("package main") {
+		t.Fatalf("cats length = %d, want %d (one per rune)", len(cats), len("package main"))
+	}
+	if cats[0] != highlight.CatKeyword {
+		t.Errorf("'package' = category %v, want keyword", cats[0])
+	}
+}
+
+func TestExpandStyledParallelAndCarriesStyle(t *testing.T) {
+	// 'a' keyword, then a tab (text) expanding to spaces.
+	cats := []highlight.Category{highlight.CatKeyword, highlight.CatText}
+	cells, styles := expandStyled([]rune("a\t"), cats)
+	if len(cells) != len(styles) {
+		t.Fatalf("cells=%d styles=%d, must be parallel", len(cells), len(styles))
+	}
+	if styles[0] != catStyle(highlight.CatKeyword) {
+		t.Errorf("first cell not styled as keyword")
 	}
 }
 
