@@ -31,13 +31,13 @@ federation of foreign tools with N keybind dialects.
 |-----------------|-----------------------------------------------|
 | Workspaces      | Single project per session; N projects = N sessions |
 | Remote          | Daemon lives where the code lives; attach from any terminal over SSH. Disconnect survival = crash survival. |
-| Editor bar      | Replaces *my* IDE usage — ships as `tide-edit`, phase 2 |
-| Code intel      | LSP — completion, goto-def, diagnostics; lives in `tide-edit` |
-| Search          | Project-wide search & replace; lives in `tide-edit` |
+| Editor bar      | Replaces *my* IDE usage — ships as `teddy`, phase 2 |
+| Code intel      | LSP — completion, goto-def, diagnostics; lives in `teddy` |
+| Search          | Project-wide search & replace; lives in `teddy` |
 | Git             | `tide-git` first-party tool, phase 2          |
 | Debugger        | **Out** — stays in GoLand                      |
 | Agent pane      | **Out** — agents run in terminal panes as anywhere |
-| Assumed basics  | Phase 1: tabs/tiles, mouse selection, clickable chrome. `tide-edit` table stakes: syntax highlighting, fuzzy file open, editor tabs |
+| Assumed basics  | Phase 1: tabs/tiles, mouse selection, clickable chrome. `teddy` table stakes: syntax highlighting, fuzzy file open, editor tabs |
 
 ## Invocation
 
@@ -81,7 +81,7 @@ Capabilities ship as first-party standalone tools that attach to the session
 
 ## Capability model — first-party tools, one protocol
 
-- The editor (`tide-edit`) and git tool (`tide-git`) ship as standalone
+- The editor (`teddy`) and git tool (`tide-git`) ship as standalone
   binaries — usable outside tide, products in their own right.
 - When tide spawns a pane it injects `TIDE_SESSION` (session id + socket
   path). Any tide-family tool launched in that pane discovers the session
@@ -95,12 +95,12 @@ Capabilities ship as first-party standalone tools that attach to the session
 - **Phase 1 — the terminal environment.** Foundation §1–4: daemon, attach,
   terminal panes/tabs, mouse-first chrome, `TIDE_SESSION` injection, and a
   session protocol stable enough for tools to target.
-- **Phase 2 — the tools.** `tide-edit` (LSP, project-wide search & replace)
+- **Phase 2 — the tools.** `teddy` (LSP, project-wide search & replace)
   and `tide-git`, attaching via the protocol.
 
 ## Engineering constraints
 
-- **Go for everything we can.** Daemon, client, `tide-edit`, `tide-git` —
+- **Go for everything we can.** Daemon, client, `teddy`, `tide-git` —
   all Go. Other languages only where Go is genuinely impossible.
 - **All dependencies vendored** (`go mod vendor`), pinned, committed. The
   repo builds offline, from itself, forever.
@@ -253,6 +253,53 @@ Capabilities ship as first-party standalone tools that attach to the session
   boundary under the pointer highlights — corners light every border they
   join, previewing what the gesture affects; elsewhere the chrome degrades
   to no highlight, never to broken clicks.
+
+- **`teddy` — the editor tool** *(ruled 2026-06-17; working name was
+  `tide-edit`)*. A standalone terminal editor binary, a product in its own
+  right; tide-integration is an enhancement layer keyed on `TIDE_SESSION`,
+  never a requirement to run. Layout (VS Code lineage): a far-left activity
+  bar (Browser now; Search/Git present but inert until built), a collapsible
+  side panel showing the selected activity, an editor tab strip, and a
+  single editor/viewer area — **no tiling inside teddy; tide owns
+  splitting** (panes target tide-family tools). Theme and input reuse
+  tide's: the 16-color palette and the `internal/input` decoder, so teddy
+  speaks one input dialect with tide.
+  - **Editing**: a minimal real editor — open, edit, Ctrl+S save,
+    undo/redo. LSP and project-wide search & replace are deferred (still
+    teddy's, later).
+  - **Syntax highlighting**: from the start, via vendored **chroma**
+    (pure-Go, MIT) used as a lexer only — teddy maps chroma tokens onto its
+    own 16-color styles, never chroma's formatter, so highlighting obeys
+    tide's palette.
+  - **Markdown**: a `raw ↔ viz` toggle per `.md` buffer; viz renders with
+    the terminal's own palette (no truecolor), matching the theme.
+  - **Tabs are draggable, labeled by file path.** Standalone: drag reorders
+    within teddy's own strip. In a tide session: the drag is **delivered
+    through tide** — the first bidirectional tool↔daemon surface.
+- **Cross-tide tab drag** *(ruled 2026-06-17; built in the second teddy
+  increment)*. When a tab-drag begins in a tide session, teddy hands the
+  daemon a payload (`{file, path}`); the daemon owns the drag from there —
+  it alone can draw across pane edges — rendering a ghost on the
+  compositor's floating layer (sibling of the overlay) and routing the drop:
+  - drop back in teddy's own strip → reorder;
+  - drop on a tide boundary / empty area → **tear-off**: the file opens in a
+    new pane running teddy (needs the new daemon capability
+    *spawn-pane-with-command*; today panes only spawn `$SHELL`);
+  - drop on another teddy pane → that teddy opens the file;
+  - drop on a terminal pane → the file path is typed into that shell.
+  New protocol surface (designed; the coherence boundary gains its first
+  tool-facing bytes): `tool_attach` (a pane announces it is teddy and what
+  it can open), `drag_start`/`drag_drop`, and `open{path}`. Clipboard and
+  keymap fetch are designed-for but deferred; teddy mirrors tide's CUA
+  defaults locally until then.
+- **teddy delivery phasing** *(ruled 2026-06-17)*. **T1** ships teddy
+  standalone (chrome, file browser, tabs with in-strip reorder, minimal
+  editing, chroma highlighting, markdown viz) — a UX-exploration increment:
+  felt before its deep adversarial audit, per the established pattern. **T2**
+  adds the cross-tide drag and its protocol surface once T1's feel is
+  validated. Unsaved-buffer crash survival (the full-product acceptance
+  test) is deferred to a later teddy increment: teddy will self-checkpoint
+  dirty buffers, mirroring the daemon.
 
 ## Open rulings
 

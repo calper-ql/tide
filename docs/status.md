@@ -131,11 +131,23 @@ scrubbed environment (spec: capability model).
 - Keymap editing UI ("editable from inside the UI") not built yet; the
   CUA defaults are fixed until it is.
 
-## Next: Phase 2 — the tools
+## Next: Phase 2 — the tools (`teddy` first)
 
-`tide-edit` (LSP completion/goto-def/diagnostics, project-wide search &
-replace, syntax highlighting, fuzzy open, editor tabs) and `tide-git`,
-shipping as standalone binaries that discover the session via
-`TIDE_SESSION` and speak the protocol — coherence enforced by protocol,
-not monolith. First step: freeze the session protocol surface tools will
-target, then scaffold `tide-edit`.
+The editor ships as **`teddy`** (ruled 2026-06-17; design in
+[tide-spec-v1.md](tide-spec-v1.md)): a standalone terminal editor that
+integrates with tide via `TIDE_SESSION`. Activity bar + collapsible file
+browser, draggable editor tabs labeled by path, a single editor/viewer area
+(tide owns tiling), minimal editing with Ctrl+S/undo, chroma syntax
+highlighting, and a markdown raw/viz toggle.
+
+- **T1 (in progress)** — teddy standalone: the chrome, browser, tabs
+  (in-strip reorder), minimal editing, highlighting, markdown viz. Reuses
+  `internal/input` and the 16-color palette. UX-exploration increment: felt
+  before the deep audit.
+- **T2** — the cross-tide tab drag: a tab dragged out of teddy is delivered
+  through tide (tear-off to a new pane, drop onto another teddy, or path
+  paste into a terminal). Adds the first tool-facing protocol surface
+  (`tool_attach`, `drag_start`/`drag_drop`, `open`) and a
+  spawn-pane-with-command daemon capability.
+
+`tide-git` follows teddy.
