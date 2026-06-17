@@ -47,6 +47,9 @@ type doc struct {
 
 	undo, redo []snapshot
 	lastKind   editKind
+
+	preview    bool // markdown viz vs raw (only meaningful for .md)
+	previewTop int  // viz scroll offset
 }
 
 func newDoc(path string, data []byte) *doc {
@@ -55,8 +58,12 @@ func newDoc(path string, data []byte) *doc {
 	for i, p := range parts {
 		lines[i] = []rune(p)
 	}
-	return &doc{path: path, lines: lines}
+	return &doc{path: path, lines: lines, preview: isMarkdown(path)}
 }
+
+// isMarkdownPreview reports whether the doc should render as markdown viz
+// (a .md file with preview on) rather than as an editable buffer.
+func (d *doc) isMarkdownPreview() bool { return d.preview && isMarkdown(d.path) }
 
 func (d *doc) line() []rune { return d.lines[d.cy] }
 
@@ -414,6 +421,10 @@ func (a *App) drawEditor(buf *tui.Buffer, r tui.Rect) {
 		drawIn(buf, r, max((r.W-strWidth(msg))/2, 0), r.H/2, stHint, msg)
 		return
 	}
+	if d.isMarkdownPreview() {
+		a.drawMarkdown(buf, r, d)
+		return
+	}
 
 	gw := gutterWidth(len(d.lines))
 	viewW := r.W - gw
@@ -444,6 +455,25 @@ func (a *App) drawEditor(buf *tui.Buffer, r tui.Rect) {
 	curCol := displayCol(d.line(), d.cx) - d.left
 	a.screen.SetCursor(r.X+gw+curCol, r.Y+(d.cy-d.top))
 	a.screen.ShowCursor()
+}
+
+// drawMarkdown renders the doc as markdown viz (read-only): no gutter, no
+// cursor, its own scroll offset. Toggle back to raw to edit.
+func (a *App) drawMarkdown(buf *tui.Buffer, r tui.Rect, d *doc) {
+	width := r.W - 2 // a one-column margin each side
+	if width < 1 {
+		return
+	}
+	lines := renderMarkdown(string(d.bytes()), width)
+	d.viewH = r.H
+	d.previewTop = clampInt(d.previewTop, 0, max(len(lines)-1, 0))
+	for i := 0; i < r.H; i++ {
+		li := d.previewTop + i
+		if li >= len(lines) {
+			break
+		}
+		drawMdLine(buf, r.X+1, r.Y+i, width, lines[li])
+	}
 }
 
 // lineStyles returns a per-display-cell style slice for one line, or nil for

@@ -87,6 +87,8 @@ type App struct {
 	dragMoved  bool
 	pressClose int // tab whose close glyph was pressed, or -1
 
+	mdToggle tui.Rect // status-bar markdown viz/raw toggle, for hit-testing
+
 	last regions // geometry from the last render, for mouse hit-testing
 }
 
@@ -154,6 +156,9 @@ func (a *App) handleKey(ev input.Event) {
 		case 'b':
 			a.sideCollapsed = !a.sideCollapsed
 			return
+		case 'e':
+			a.togglePreview()
+			return
 		case 's':
 			a.saveActive()
 			return
@@ -204,6 +209,10 @@ func (a *App) handleMouse(ev input.Event) {
 	// A fresh left-press: clear any stale tab-drag arming.
 	a.dragFrom, a.pressClose = -1, -1
 
+	if a.mdToggle.Contains(ev.X, ev.Y) {
+		a.togglePreview()
+		return
+	}
 	if a.last.tabs.Contains(ev.X, ev.Y) {
 		a.pressTab(ev.X)
 		return
@@ -237,7 +246,11 @@ func (a *App) wheel(ev input.Event, delta int) {
 		return
 	}
 	if d := a.activeDoc(); d != nil && a.last.editor.Contains(ev.X, ev.Y) {
-		d.top = clampInt(d.top+delta, 0, max(len(d.lines)-1, 0))
+		if d.isMarkdownPreview() {
+			d.previewTop = max(d.previewTop+delta, 0)
+		} else {
+			d.top = clampInt(d.top+delta, 0, max(len(d.lines)-1, 0))
+		}
 	}
 }
 

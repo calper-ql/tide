@@ -30,4 +30,12 @@ var (
 
 	stSelected = tui.DefaultStyle.Reversed() // selected browser row (full-width bar)
 	stDir      = tui.DefaultStyle.WithFG(tui.Blue)
+
+	// markdown viz
+	stMdHeading = tui.DefaultStyle.WithFG(tui.Cyan).Bolded()
+	stMdCode    = tui.DefaultStyle.WithFG(tui.Green)
+	stMdLink    = tui.DefaultStyle.WithFG(tui.Blue).Underlined()
+	stMdQuote   = tui.DefaultStyle.Fainted().Italicized()
+	stMdRule    = tui.DefaultStyle.Fainted()
+	stMdBullet  = tui.DefaultStyle.WithFG(tui.Cyan)
 )

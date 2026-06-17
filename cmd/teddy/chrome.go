@@ -83,6 +83,20 @@ func (a *App) drawStatusBar(buf *tui.Buffer, r tui.Rect) {
 	root := shortenPath(a.root, max(r.W/3, 8))
 	x = drawIn(buf, r, x-r.X+1, 0, stStatusDim, root)
 
+	// A clickable viz/raw pill for markdown docs (mouse-first toggle; Ctrl+E
+	// also works). The pill shows the current mode.
+	a.mdToggle = tui.Rect{}
+	if d := a.activeDoc(); d != nil && isMarkdown(d.path) {
+		mode := "raw"
+		if d.preview {
+			mode = "viz"
+		}
+		px := x - r.X + 1
+		end := drawIn(buf, r, px, 0, stAccentPill, " md:"+mode+" ")
+		a.mdToggle = tui.Rect{X: r.X + px, Y: r.Y, W: end - (r.X + px), H: 1}
+		x = end
+	}
+
 	// Right side: cursor position + dirty marker when a doc is open, else hints.
 	right := "^S save  ^B panel  ^Q quit "
 	if d := a.activeDoc(); d != nil {
