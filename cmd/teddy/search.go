@@ -183,74 +183,69 @@ func (a *App) clickSearch(x, y int) {
 	a.search.focused = true
 }
 
+// searchSummary is the right-hand status on the toggle row: a match count,
+// progress, or an error. Empty (no "type to search" noise) when idle.
+func (a *App) searchSummary() (string, tui.Style) {
+	switch {
+	case a.search.errText != "":
+		return a.search.errText, stHlError
+	case a.search.running:
+		return "searching…", stDim
+	case strings.TrimSpace(a.search.query) == "":
+		return "", stDim
+	case len(a.search.results) == 0:
+		return "no matches", stDim
+	default:
+		s := fmt.Sprintf("%d matches", len(a.search.results))
+		if a.search.truncated {
+			s += " (capped)"
+		}
+		return s, stDim
+	}
+}
+
 func (a *App) drawSearch(buf *tui.Buffer, inner tui.Rect) {
-	// Query box on row 1 (row 0 is the panel title).
+	// Row 1: the query box, full width.
 	box := tui.Rect{X: inner.X, Y: inner.Y + 1, W: inner.W, H: 1}
 	a.search.inputHit = box
-
-	// Modifier toggles, right-aligned: Aa (case), \b (whole word), .* (regex).
-	toggles := []struct {
-		label string
-		on    bool
-	}{{"Aa", a.search.matchCase}, {`\b`, a.search.wholeWord}, {".*", a.search.regex}, {"·", a.search.omitHidden}}
-	tw := 0
-	for _, t := range toggles {
-		tw += strWidth(t.label) + 1
-	}
-	a.search.toggleHits = a.search.toggleHits[:0]
-	fieldRight := box.X + box.W // query field right edge
-	if box.W >= tw+10 {         // room for toggles and a usable field
-		x := box.X + box.W - tw
-		fieldRight = x
-		for _, t := range toggles {
-			st := stDim
-			if t.on {
-				st = stAccent
-			}
-			w := strWidth(t.label)
-			drawIn(buf, tui.Rect{X: x, Y: box.Y, W: w, H: 1}, 0, 0, st, t.label)
-			a.search.toggleHits = append(a.search.toggleHits, tui.Rect{X: x, Y: box.Y, W: w, H: 1})
-			x += w + 1
-		}
-	}
-
-	// Query field fills the space to the left of the toggles.
-	field := tui.Rect{X: box.X, Y: box.Y, W: max(fieldRight-box.X-1, 1), H: 1}
 	ist := stStatusDim
 	if a.searchActive() {
 		ist = stStatus
 	}
-	buf.Fill(field, ' ', ist)
-	drawIn(buf, field, 0, 0, ist, "⚲ ")
+	buf.Fill(box, ' ', ist)
+	drawIn(buf, box, 0, 0, ist, "⚲ ")
 	shown := a.search.query
-	if maxQ := field.W - 3; maxQ > 0 && strWidth(shown) > maxQ {
+	if maxQ := box.W - 3; maxQ > 0 && strWidth(shown) > maxQ {
 		shown = string([]rune(shown)[strLen(shown)-maxQ:]) // keep the tail near the cursor
 	}
-	qx := drawIn(buf, field, 2, 0, ist, shown)
+	qx := drawIn(buf, box, 2, 0, ist, shown)
 	if a.searchActive() {
-		a.screen.SetCursor(min(qx, field.X+field.W-1), field.Y)
+		a.screen.SetCursor(min(qx, box.X+box.W-1), box.Y)
 		a.screen.ShowCursor()
 	}
 
-	// Summary on row 2.
-	var summary string
-	sumSt := stDim
-	switch {
-	case a.search.errText != "":
-		summary, sumSt = a.search.errText, stHlError
-	case a.search.running:
-		summary = "searching…"
-	case strings.TrimSpace(a.search.query) == "":
-		summary = "type to search"
-	case len(a.search.results) == 0:
-		summary = "no matches"
-	default:
-		summary = fmt.Sprintf("%d matches", len(a.search.results))
-		if a.search.truncated {
-			summary += " (capped)"
+	// Row 2: filter toggles on the left, status on the right.
+	toggles := []struct {
+		label string
+		on    bool
+	}{{"Aa", a.search.matchCase}, {`\b`, a.search.wholeWord}, {".*", a.search.regex}, {"·", a.search.omitHidden}}
+	a.search.toggleHits = a.search.toggleHits[:0]
+	x := inner.X
+	for _, t := range toggles {
+		st := stDim
+		if t.on {
+			st = stAccent
+		}
+		w := strWidth(t.label)
+		drawIn(buf, tui.Rect{X: x, Y: inner.Y + 2, W: w, H: 1}, 0, 0, st, t.label)
+		a.search.toggleHits = append(a.search.toggleHits, tui.Rect{X: x, Y: inner.Y + 2, W: w, H: 1})
+		x += w + 1
+	}
+	if summary, sumSt := a.searchSummary(); summary != "" {
+		if sx := inner.W - strWidth(summary); sx > x-inner.X {
+			drawIn(buf, inner, sx, 2, sumSt, summary)
 		}
 	}
-	drawIn(buf, inner, 0, 2, sumSt, summary)
 
 	// Results from row 3.
 	const top = 3
