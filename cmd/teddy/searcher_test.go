@@ -47,6 +47,29 @@ func TestRunSearchFindsMatchesSkipsGitAndBinary(t *testing.T) {
 	}
 }
 
+func TestRunSearchOmitsHidden(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".hidden"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, rel := range []string{".hidden/x.txt", ".dotfile", "visible.txt"} {
+		if err := os.WriteFile(filepath.Join(dir, rel), []byte("needle\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	ch := make(chan searchMsg, 1)
+	runSearch(context.Background(), dir, searchOpts{query: "needle", omitHidden: true}, 1, ch)
+	if msg := <-ch; len(msg.results) != 1 || filepath.Base(msg.results[0].path) != "visible.txt" {
+		t.Errorf("omitHidden results = %+v, want only visible.txt", msg.results)
+	}
+
+	runSearch(context.Background(), dir, searchOpts{query: "needle"}, 2, ch)
+	if msg := <-ch; len(msg.results) != 3 {
+		t.Errorf("include-hidden results = %d, want 3 (.hidden/x.txt, .dotfile, visible.txt)", len(msg.results))
+	}
+}
+
 func TestBuildMatcher(t *testing.T) {
 	must := func(o searchOpts) func(string) (int, bool) {
 		m, err := buildMatcher(o)

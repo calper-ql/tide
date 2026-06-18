@@ -123,6 +123,7 @@ func newApp(scr *tui.Screen, root string) *App {
 		root:      root,
 		sideWidth: defaultSideWidth,
 		browser:   newBrowser(root),
+		search:    searchState{omitHidden: true}, // skip dotfiles by default
 		dragFrom:  -1, pressClose: -1,
 	}
 }

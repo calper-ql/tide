@@ -18,10 +18,11 @@ const (
 
 // searchOpts is a query plus the VS Code-style match modifiers.
 type searchOpts struct {
-	query     string
-	matchCase bool
-	wholeWord bool
-	regex     bool
+	query      string
+	matchCase  bool
+	wholeWord  bool
+	regex      bool
+	omitHidden bool // skip dotfiles and dot-directories
 }
 
 // searchResult is one matching line.
@@ -93,6 +94,14 @@ func runSearch(ctx context.Context, root string, opts searchOpts, seq int, out c
 			if d.Name() == ".git" {
 				return filepath.SkipDir
 			}
+			// Skip hidden directories (but never the root itself, which may be
+			// a dot-directory the user explicitly opened).
+			if opts.omitHidden && path != root && strings.HasPrefix(d.Name(), ".") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if opts.omitHidden && strings.HasPrefix(d.Name(), ".") {
 			return nil
 		}
 		info, ierr := d.Info()

@@ -12,10 +12,11 @@ import (
 
 // searchState is the Search activity's UI + query state.
 type searchState struct {
-	query     string
-	matchCase bool
-	wholeWord bool
-	regex     bool
+	query      string
+	matchCase  bool
+	wholeWord  bool
+	regex      bool
+	omitHidden bool
 
 	results   []searchResult
 	running   bool
@@ -58,10 +59,11 @@ func (a *App) startSearch(query string) {
 	seq := a.searchSeq
 	a.search.running = true
 	opts := searchOpts{
-		query:     query,
-		matchCase: a.search.matchCase,
-		wholeWord: a.search.wholeWord,
-		regex:     a.search.regex,
+		query:      query,
+		matchCase:  a.search.matchCase,
+		wholeWord:  a.search.wholeWord,
+		regex:      a.search.regex,
+		omitHidden: a.search.omitHidden,
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	a.searchCancel = cancel
@@ -88,6 +90,8 @@ func (a *App) toggleSearchOption(i int) {
 		a.search.wholeWord = !a.search.wholeWord
 	case 2:
 		a.search.regex = !a.search.regex
+	case 3:
+		a.search.omitHidden = !a.search.omitHidden
 	}
 	a.startSearch(a.search.query)
 }
@@ -107,6 +111,8 @@ func (a *App) handleSearchKey(ev input.Event) {
 				a.toggleSearchOption(1)
 			case 'r':
 				a.toggleSearchOption(2)
+			case 'h':
+				a.toggleSearchOption(3)
 			}
 			return
 		}
@@ -186,7 +192,7 @@ func (a *App) drawSearch(buf *tui.Buffer, inner tui.Rect) {
 	toggles := []struct {
 		label string
 		on    bool
-	}{{"Aa", a.search.matchCase}, {`\b`, a.search.wholeWord}, {".*", a.search.regex}}
+	}{{"Aa", a.search.matchCase}, {`\b`, a.search.wholeWord}, {".*", a.search.regex}, {"·", a.search.omitHidden}}
 	tw := 0
 	for _, t := range toggles {
 		tw += strWidth(t.label) + 1
