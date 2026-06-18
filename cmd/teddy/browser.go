@@ -33,6 +33,8 @@ type browser struct {
 	top  int // scroll offset (index of the first visible row)
 	sel  int // selected row
 
+	revealedPath string // last file auto-revealed (so reveal fires once per change)
+
 	contentY int // absolute screen y of the first tree row (set on render)
 	viewRows int
 }
@@ -115,8 +117,52 @@ func (b *browser) scroll(delta int) {
 	b.top = clampInt(b.top+delta, 0, max(len(b.flat)-1, 0))
 }
 
+// reveal expands the tree from the root down to target, selects it, and lets
+// the next render scroll it into view. It only ever expands (never collapses),
+// and no-ops when target is not under the root. Skips quietly if the path is
+// not present on disk (e.g. an untracked new file).
+func (b *browser) reveal(target string) {
+	b.revealedPath = target
+	rel, err := filepath.Rel(b.root.path, target)
+	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+		return
+	}
+	node := b.root
+	segs := strings.Split(rel, string(filepath.Separator))
+	for i, seg := range segs {
+		b.load(node)
+		var child *treeNode
+		for _, c := range node.children {
+			if c.name == seg {
+				child = c
+				break
+			}
+		}
+		if child == nil {
+			return
+		}
+		if i < len(segs)-1 { // an ancestor directory: expand it
+			b.load(child)
+			child.expanded = true
+		}
+		node = child
+	}
+	b.reflatten()
+	for i, e := range b.flat {
+		if e.node == node {
+			b.sel = i
+			return
+		}
+	}
+}
+
 func (a *App) drawBrowser(buf *tui.Buffer, inner tui.Rect) {
 	b := a.browser
+	// Auto-reveal: keep the tree selection on the active file (only while the
+	// Explorer is on screen, and only when the active file changed).
+	if d := a.activeDoc(); d != nil && d.path != "" && d.path != b.revealedPath {
+		b.reveal(d.path)
+	}
 	// row 0 is the panel title (drawn by drawSidePanel); row 1 the workspace
 	// folder name; the tree starts at row 2.
 	drawIn(buf, inner, 1, 1, stDim, b.root.name+"/")

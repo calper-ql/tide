@@ -47,6 +47,42 @@ func TestBrowserExpandCollapse(t *testing.T) {
 	}
 }
 
+func TestBrowserReveal(t *testing.T) {
+	dir := t.TempDir()
+	deep := filepath.Join(dir, "a", "b")
+	if err := os.MkdirAll(deep, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f := filepath.Join(deep, "c.txt")
+	if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	b := newBrowser(dir)
+	b.reveal(f)
+
+	if b.revealedPath != f {
+		t.Errorf("revealedPath = %q, want %q", b.revealedPath, f)
+	}
+	if b.sel < 0 || b.sel >= len(b.flat) {
+		t.Fatalf("sel %d out of range (flat len %d)", b.sel, len(b.flat))
+	}
+	if got := b.flat[b.sel].node; got.name != "c.txt" || got.path != f {
+		t.Errorf("selected = %q at %s, want c.txt at %s", got.name, got.path, f)
+	}
+	for _, want := range []string{"a", "b", "c.txt"} {
+		found := false
+		for _, n := range names(b) {
+			if n == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("flat %v missing %q (ancestor not expanded to reveal)", names(b), want)
+		}
+	}
+}
+
 func TestBrowserOpensFile(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "f.txt")
