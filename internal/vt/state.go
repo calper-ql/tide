@@ -120,6 +120,16 @@ type State struct {
 	// (default); 2 steady block, 3/4 underline, 5/6 bar.
 	cursorShape int
 
+	// tide: keyboard enhancement protocols the inner app has requested, so
+	// the router can re-encode the modified keys a legacy terminal would have
+	// to drop (shift+enter chief among them). kittyFlags is the active Kitty
+	// keyboard protocol flag set (0 = disabled) and kittyStack the entries
+	// saved by the CSI > / CSI < push/pop pair; modifyOtherKeys is the xterm
+	// XTMODKEYS level (0/1/2) from CSI > 4 ; Pv m. See input.EncodeKey.
+	kittyFlags      int
+	kittyStack      []int
+	modifyOtherKeys int
+
 	// tide: fixed-capacity ring of lines scrolled off the top of the main
 	// screen; see scrollback.go.
 	history      []line
@@ -389,6 +399,11 @@ func (t *State) reset() {
 	t.mode = ModeWrap
 	t.colorOverride = make(map[Color]Color) // RIS resets palette overrides
 	t.cursorShape = 0
+	// tide: a hard reset drops any keyboard-protocol enhancement the app had
+	// negotiated, back to the legacy encoding.
+	t.kittyFlags = 0
+	t.kittyStack = nil
+	t.modifyOtherKeys = 0
 	// tide: clear the WHOLE screen — upstream transposed the args
 	// (rows-1,cols-1), wiping only a square corner.
 	t.clearAll()

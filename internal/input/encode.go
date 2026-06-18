@@ -14,6 +14,14 @@ type EncodeOpts struct {
 	AppKeypad      bool // DECNKM; currently informational
 	BracketedPaste bool // mode 2004: wrap pastes in 200~/201~
 	CRLF           bool // LNM: Enter sends \r\n instead of \r
+
+	// KittyFlags is the pane's active Kitty keyboard protocol flag set (0
+	// when the app has not enabled it); ModifyOtherKeys is its xterm
+	// modifyOtherKeys level (0/1/2). When either is on, the modifier
+	// combinations the legacy encodings drop — shift+enter most visibly —
+	// are sent in the protocol's escape form instead. See EncodeKey.
+	KittyFlags      int
+	ModifyOtherKeys int
 }
 
 // EncodeKey renders a key event as the byte sequence a directly-attached
@@ -29,6 +37,12 @@ func EncodeKey(ev Event, o EncodeOpts) []byte {
 		return nil
 	}
 	m := ev.Mods & (Shift | Alt | Ctrl)
+	// An app that negotiated an enhanced keyboard protocol wants the modifier
+	// combinations the legacy encodings cannot carry; render those here and
+	// let everything the legacy form handles faithfully fall through.
+	if b := encodeEnhanced(ev, m, o); b != nil {
+		return b
+	}
 	switch ev.Key {
 	case KeyUp:
 		return cursorKey('A', m, o.AppCursor)
@@ -104,6 +118,68 @@ func EncodeKey(ev Event, o EncodeOpts) []byte {
 		return encodeRune(ev.Rune, m)
 	}
 	return nil
+}
+
+// encodeEnhanced renders the modified keys whose modifiers the legacy
+// terminal encodings cannot carry, using whichever enhanced keyboard
+// protocol the pane has enabled (Kitty preferred, else modifyOtherKeys). It
+// returns nil — deferring to the legacy encoding — when no protocol is
+// active, or when the legacy form already delivers the key faithfully:
+// unmodified keys, the alt that ESC-prefixes, ctrl on keys with a C0 byte,
+// all printable text, and the arrows/Home/End/function keys/Tab that already
+// carry the full modifier set via CSI 1;mods. Only the Kitty protocol's
+// disambiguation level is produced; richer flags (event types, all keys as
+// escape codes) degrade to it, which is a faithful subset.
+func encodeEnhanced(ev Event, m Mod, o EncodeOpts) []byte {
+	if o.KittyFlags == 0 && o.ModifyOtherKeys == 0 {
+		return nil
+	}
+	cp, ok := lossyCodepoint(ev, m)
+	if !ok {
+		return nil
+	}
+	if o.KittyFlags != 0 {
+		// Kitty CSI-u: CSI unicode-key-code ; modifiers u
+		return fmt.Appendf(nil, "\x1b[%d;%du", cp, modParam(m))
+	}
+	// xterm modifyOtherKeys: CSI 27 ; modifiers ; unicode-key-code ~
+	return fmt.Appendf(nil, "\x1b[27;%d;%d~", modParam(m), cp)
+}
+
+// lossyCodepoint returns the Kitty/modifyOtherKeys unicode-key-code for a key
+// event whose modifiers the legacy encoding would silently drop, and
+// ok=false for every event the legacy path should keep handling. The code
+// points match the decoder's table (see codepointKey): Enter 13, Escape 27,
+// Backspace 127, Space 32, and a rune's own value.
+func lossyCodepoint(ev Event, m Mod) (cp int, ok bool) {
+	switch ev.Key {
+	case KeyEnter: // legacy carries only Alt (ESC \r); shift/ctrl are dropped
+		if m&(Shift|Ctrl) != 0 {
+			return 13, true
+		}
+	case KeyEscape: // legacy carries only Alt (ESC ESC)
+		if m&(Shift|Ctrl) != 0 {
+			return 27, true
+		}
+	case KeyBackspace: // legacy carries Ctrl (BS) and Alt; shift is dropped
+		if m&Shift != 0 {
+			return 127, true
+		}
+	case KeySpace: // legacy carries Ctrl (NUL) and Alt; shift is dropped
+		if m&Shift != 0 {
+			return 32, true
+		}
+	case KeyRune:
+		// A ctrl chord with no C0 byte (ctrl+/, ctrl+1, …) drops ctrl in the
+		// legacy form. Runes that do have one (ctrl+a → 0x01) keep using it,
+		// as do all unmodified and shifted-text runes.
+		if m&Ctrl != 0 && ev.Rune > 0 {
+			if _, hasC0 := ctrlByte(ev.Rune); !hasC0 {
+				return int(ev.Rune), true
+			}
+		}
+	}
+	return 0, false
 }
 
 // EncodePaste renders pasted data for the pane: wrapped in 200~/201~

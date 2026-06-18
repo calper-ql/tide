@@ -54,9 +54,10 @@ func (c *csiEscape) parse() {
 		return
 	}
 	s := string(c.buf[:len(c.buf)-1]) // drop the final byte
-	// Leading private/marker byte. Only '?' sets priv; '>' and '=' are kept
-	// out of the parameter text but resolved via c.buf elsewhere (DA).
-	if len(s) > 0 && (s[0] == '?' || s[0] == '>' || s[0] == '=') {
+	// Leading private/marker byte. Only '?' sets priv; '>', '=' and '<' are
+	// kept out of the parameter text but resolved via c.buf elsewhere (DA,
+	// and the Kitty keyboard protocol's CSI >/=/< ... u forms).
+	if len(s) > 0 && (s[0] == '?' || s[0] == '>' || s[0] == '=' || s[0] == '<') {
 		if s[0] == '?' {
 			c.priv = true
 		}
@@ -229,7 +230,15 @@ func (t *State) handleCSI() {
 	case 'h': // SM - set terminal mode
 		t.setMode(c.priv, true, c.args)
 	case 'm': // SGR - terminal attribute (color)
-		t.setAttr(c.args, c.argsSub)
+		if len(c.buf) > 0 && c.buf[0] == '>' {
+			// tide: CSI > Pp ; Pv m is xterm XTMODKEYS ("set key modifier
+			// options"), NOT an SGR — routing it to setAttr would corrupt the
+			// pane's text attributes. Only resource 4 (modifyOtherKeys)
+			// changes how the router encodes keys; the rest are ignored.
+			t.setModifyOtherKeys(c.arg(0, 0), c.arg(1, 0))
+		} else {
+			t.setAttr(c.args, c.argsSub)
+		}
 	case 'n':
 		switch c.arg(0, 0) {
 		case 5: // DSR - device status report
@@ -251,8 +260,23 @@ func (t *State) handleCSI() {
 		}
 	case 's': // DECSC - save cursor position (ANSI.SYS)
 		t.saveCursor()
-	case 'u': // DECRC - restore cursor position (ANSI.SYS)
-		t.restoreCursor()
+	case 'u':
+		// tide: bare CSI u is DECRC (restore cursor, ANSI.SYS). With a
+		// private marker it is a Kitty keyboard protocol request — the inner
+		// app enabling enhanced key reporting so combinations like shift+enter
+		// become distinguishable (the router then re-encodes them in kind).
+		switch {
+		case c.priv: // CSI ? u - query the active flags
+			t.w.Write(fmt.Appendf(nil, "\x1b[?%du", t.kittyFlags))
+		case len(c.buf) > 0 && c.buf[0] == '>': // CSI > flags u - push
+			t.kittyPush(c.arg(0, 0))
+		case len(c.buf) > 0 && c.buf[0] == '<': // CSI < n u - pop n entries
+			t.kittyPop(c.arg(0, 1))
+		case len(c.buf) > 0 && c.buf[0] == '=': // CSI = flags ; mode u - set
+			t.kittySet(c.arg(0, 0), c.arg(1, 1))
+		default:
+			t.restoreCursor()
+		}
 	}
 	return
 unknown: // TODO: get rid of this goto
@@ -275,4 +299,57 @@ func (t *State) handleCSIInter() {
 	default:
 		t.logf("unknown CSI intermediate %q mode %q\n", string(c.inter), string(c.mode))
 	}
+}
+
+// tide: the Kitty keyboard protocol flags occupy five bits — disambiguate
+// escape codes, report event types, report alternate keys, report all keys
+// as escape codes, report associated text.
+const kittyFlagsMask = 0x1f
+
+// kittyPush activates flags (CSI > flags u), saving the previous set so a
+// later pop restores it.
+func (t *State) kittyPush(flags int) {
+	t.kittyStack = append(t.kittyStack, t.kittyFlags)
+	t.kittyFlags = flags & kittyFlagsMask
+}
+
+// kittyPop restores the flags saved by the n most recent pushes (CSI < n u),
+// clamped to the stack depth; an exhausted stack means all enhancements off.
+func (t *State) kittyPop(n int) {
+	if n < 1 {
+		n = 1
+	}
+	for ; n > 0 && len(t.kittyStack) > 0; n-- {
+		t.kittyFlags = t.kittyStack[len(t.kittyStack)-1]
+		t.kittyStack = t.kittyStack[:len(t.kittyStack)-1]
+	}
+	if len(t.kittyStack) == 0 {
+		// nothing left to restore from; over-popping disables the protocol
+		if n > 0 {
+			t.kittyFlags = 0
+		}
+	}
+}
+
+// kittySet replaces (mode 1), adds (mode 2), or removes (mode 3) the active
+// flags in place, leaving the push/pop stack untouched (CSI = flags ; mode u).
+func (t *State) kittySet(flags, mode int) {
+	flags &= kittyFlagsMask
+	switch mode {
+	case 2:
+		t.kittyFlags |= flags
+	case 3:
+		t.kittyFlags &^= flags
+	default: // mode 1 (and the unspecified default): set these, clear the rest
+		t.kittyFlags = flags
+	}
+}
+
+// setModifyOtherKeys records the xterm modifyOtherKeys level (resource 4 of
+// XTMODKEYS). Other resources do not affect key encoding and are ignored.
+func (t *State) setModifyOtherKeys(resource, level int) {
+	if resource != 4 {
+		return
+	}
+	t.modifyOtherKeys = level
 }

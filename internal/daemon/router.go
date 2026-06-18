@@ -163,11 +163,14 @@ func (w *ws) snapLiveLocked(paneID string) {
 
 func (w *ws) encodeOptsLocked(p *pane) input.EncodeOpts {
 	m := p.term.ModeSnapshot()
+	kitty, modify := p.term.KeyboardProtoSnapshot()
 	return input.EncodeOpts{
-		AppCursor:      m&vt.ModeAppCursor != 0,
-		AppKeypad:      m&vt.ModeAppKeypad != 0,
-		BracketedPaste: m&vt.ModeBracketedPaste != 0,
-		CRLF:           m&vt.ModeCRLF != 0,
+		AppCursor:       m&vt.ModeAppCursor != 0,
+		AppKeypad:       m&vt.ModeAppKeypad != 0,
+		BracketedPaste:  m&vt.ModeBracketedPaste != 0,
+		CRLF:            m&vt.ModeCRLF != 0,
+		KittyFlags:      kitty,
+		ModifyOtherKeys: modify,
 	}
 }
 

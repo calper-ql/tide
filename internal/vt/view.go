@@ -90,6 +90,16 @@ func (t *Term) ModeSnapshot() ModeFlag {
 	return t.mode
 }
 
+// KeyboardProtoSnapshot returns the inner app's requested keyboard
+// enhancements under the lock: the active Kitty keyboard protocol flags
+// (0 = off) and the xterm modifyOtherKeys level (0/1/2). The router uses
+// them to re-encode modified keys the legacy form would have to drop.
+func (t *Term) KeyboardProtoSnapshot() (kittyFlags, modifyOtherKeys int) {
+	t.State.lock()
+	defer t.State.unlock()
+	return t.kittyFlags, t.modifyOtherKeys
+}
+
 // TitleSnapshot returns the OSC title under the lock.
 func (t *Term) TitleSnapshot() string {
 	t.State.lock()

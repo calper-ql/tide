@@ -88,6 +88,62 @@ func TestEncodeLossyLegacy(t *testing.T) {
 	}
 }
 
+// With an enhanced keyboard protocol active on the pane, the modifier
+// combinations the legacy encoding drops are sent in escape form so the app
+// can read them — most importantly shift+enter, which a bare CR cannot
+// express. Combinations the legacy form already carries are left untouched.
+func TestEncodeEnhanced(t *testing.T) {
+	kitty := EncodeOpts{KittyFlags: 1}
+	mok := EncodeOpts{ModifyOtherKeys: 2}
+	cases := []struct {
+		ev   Event
+		o    EncodeOpts
+		want string
+	}{
+		// the headline fix: shift+enter is now distinguishable from enter
+		{ke(KeyEnter, 0, Shift), kitty, "\x1b[13;2u"},
+		{ke(KeyEnter, 0, Ctrl), kitty, "\x1b[13;5u"},
+		{ke(KeyEnter, 0, Shift|Ctrl), kitty, "\x1b[13;6u"},
+		{ke(KeyEnter, 0, Shift|Alt), kitty, "\x1b[13;4u"},
+		{ke(KeyEscape, 0, Ctrl), kitty, "\x1b[27;5u"},
+		{ke(KeyBackspace, 0, Shift), kitty, "\x1b[127;2u"},
+		{ke(KeySpace, 0, Shift), kitty, "\x1b[32;2u"},
+		{ke(KeyRune, '/', Ctrl), kitty, "\x1b[47;5u"}, // ctrl+/ has no C0 byte
+		{ke(KeyRune, '1', Ctrl), kitty, "\x1b[49;5u"},
+		// modifyOtherKeys form when Kitty is not enabled
+		{ke(KeyEnter, 0, Shift), mok, "\x1b[27;2;13~"},
+		{ke(KeyRune, '/', Ctrl), mok, "\x1b[27;5;47~"},
+		// combos the legacy form already carries stay legacy even with the
+		// protocol on: plain/alt enter, ctrl+letter, plain and shifted text,
+		// shift+tab.
+		{ke(KeyEnter, 0, 0), kitty, "\r"},
+		{ke(KeyEnter, 0, Alt), kitty, "\x1b\r"},
+		{ke(KeyRune, 'a', Ctrl), kitty, "\x01"},
+		{ke(KeyRune, 'a', 0), kitty, "a"},
+		{ke(KeyRune, 'a', Shift), kitty, "a"},
+		{ke(KeyTab, 0, Shift), kitty, "\x1b[Z"},
+	}
+	for _, c := range cases {
+		if got := EncodeKey(c.ev, c.o); string(got) != c.want {
+			t.Errorf("%s opts %+v: got %q, want %q", fmtEvent(c.ev), c.o, got, c.want)
+		}
+	}
+}
+
+// The enhanced encodings must decode back to the event that produced them,
+// the same symmetry the legacy round-trip tests pin — this is what makes the
+// daemon's decode-once-re-encode pipeline correct for kitty-speaking panes.
+func TestRoundTripEnhanced(t *testing.T) {
+	kitty := EncodeOpts{KittyFlags: 1}
+	for _, m := range []Mod{Shift, Ctrl, Shift | Ctrl, Shift | Alt} {
+		roundTrip(t, KeyEnter, 0, m, kitty)
+		roundTrip(t, KeyEscape, 0, m, kitty)
+	}
+	roundTrip(t, KeyBackspace, 0, Shift, kitty)
+	roundTrip(t, KeyRune, '/', Ctrl, kitty)
+	roundTrip(t, KeyRune, '1', Ctrl, kitty)
+}
+
 func TestEncodeKeyNil(t *testing.T) {
 	cases := []Event{
 		{Type: EvMouse, Mouse: MousePress, Button: 1},
