@@ -52,10 +52,11 @@ func run(args []string) error {
 	return app.Run()
 }
 
-// resolveTarget maps the command line to a project root and an optional file
-// to open. A directory argument sets the root; a file argument roots teddy
-// at the file's repository and opens the file. With no argument the root is
-// resolved from cwd (the .git walk, like tide).
+// resolveTarget maps the command line to teddy's root and an optional file to
+// open. The root is the folder teddy was opened in — the path argument, or its
+// parent when the argument is a file, or cwd — taken verbatim (canonicalized),
+// with NO .git walk: the browser and search stay scoped to that folder and its
+// subtree, never climbing to an ancestor repository.
 func resolveTarget(args []string) (root, openPath string, err error) {
 	target := ""
 	for _, a := range args {
@@ -64,23 +65,25 @@ func resolveTarget(args []string) (root, openPath string, err error) {
 			break
 		}
 	}
+
+	dir := target
 	if target == "" {
-		wd, werr := os.Getwd()
-		if werr != nil {
-			return "", "", werr
+		if dir, err = os.Getwd(); err != nil {
+			return "", "", err
 		}
-		root, _, err = project.Resolve(wd)
-		return root, "", err
+	} else {
+		abs, aerr := filepath.Abs(target)
+		if aerr != nil {
+			return "", "", aerr
+		}
+		if info, serr := os.Stat(abs); serr != nil || !info.IsDir() {
+			openPath = abs // a file: existing, or one to be created
+			dir = filepath.Dir(abs)
+		} else {
+			dir = abs
+		}
 	}
-	abs, aerr := filepath.Abs(target)
-	if aerr != nil {
-		return "", "", aerr
-	}
-	if info, serr := os.Stat(abs); serr == nil && info.IsDir() {
-		root, _, err = project.Resolve(abs)
-		return root, "", err
-	}
-	// A file (existing or to be created): root at its directory's repo.
-	root, _, err = project.Resolve(filepath.Dir(abs))
-	return root, abs, err
+
+	root, err = project.Canonical(dir)
+	return root, openPath, err
 }
