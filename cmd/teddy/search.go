@@ -228,7 +228,7 @@ func (a *App) drawSearch(buf *tui.Buffer, inner tui.Rect) {
 	toggles := []struct {
 		label string
 		on    bool
-	}{{"Aa", a.search.matchCase}, {`\b`, a.search.wholeWord}, {".*", a.search.regex}, {"⊘", a.search.omitHidden}}
+	}{{"Aa", a.search.matchCase}, {`\b`, a.search.wholeWord}, {".*", a.search.regex}, {".hidden", a.search.omitHidden}}
 	a.search.toggleHits = a.search.toggleHits[:0]
 	x := inner.X
 	for _, t := range toggles {
