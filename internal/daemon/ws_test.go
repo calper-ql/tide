@@ -652,6 +652,46 @@ func TestEdgeMenuSplitsOneWindow(t *testing.T) {
 	})
 }
 
+// TestRingHoverLightsOnlyThePaneSegment pins that hovering a flat ring edge
+// previews only the abutting window's own segment — hovering under the right
+// pane must not light the left pane's bottom.
+func TestRingHoverLightsOnlyThePaneSegment(t *testing.T) {
+	w, conn, s := newTestWS(t)
+	s.waitFor(t, "first frame", func() bool { return s.contains("1:") })
+	withWS(w, func() { w.actionSplitLocked(w.lay.FocusedPane(), layout.SplitRight) }) // L | R
+
+	var rx, rw, ry int
+	s.waitFor(t, "right pane laid out", func() bool {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		if len(w.borders) == 0 {
+			return false
+		}
+		for _, r := range w.rects {
+			if r.X > w.area.X && r.X+r.W == w.area.X+w.area.W { // the right column
+				rx, rw, ry = r.X, r.W, w.rows-1
+				return true
+			}
+		}
+		return false
+	})
+	// Hover the bottom ring under the right pane's mid-column (clear of the ┴).
+	hx := rx + rw/2
+	w.handleInput(conn, []byte(fmt.Sprintf("\x1b[<35;%d;%dM", hx+1, ry+1)))
+	withWS(w, func() {
+		if len(w.hover.strips) != 1 {
+			t.Fatalf("ring hover strips = %+v, want exactly the right pane's segment", w.hover.strips)
+		}
+		st := w.hover.strips[0]
+		if st.X != rx || st.W != rw {
+			t.Fatalf("bottom hover strip = %+v, want X=%d W=%d (only the right pane)", st, rx, rw)
+		}
+		if st.X == 0 && st.W == w.cols {
+			t.Fatal("bottom hover lit the whole edge instead of one window")
+		}
+	})
+}
+
 // TestRingCornerSplitsFullWidth pins the container-level (full-span) split:
 // from the ┴ where the L|R divider meets the bottom ring, "below — full
 // width" drops a pane spanning BOTH columns, not just one window.

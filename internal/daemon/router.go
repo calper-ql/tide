@@ -458,18 +458,32 @@ func (w *ws) updateHoverLocked(x, y int) {
 			h.key += fmt.Sprintf("+h%d", hb.Rect.Y)
 		}
 	case hitFrameEdge:
-		left, right, bottom := x <= 1, x >= w.cols-2, y >= w.rows-2
-		if left {
-			h.strips = append(h.strips, layout.Rect{X: 0, Y: w.area.Y, W: 1, H: w.area.H})
-			h.key += "L"
-		}
-		if right {
-			h.strips = append(h.strips, layout.Rect{X: w.cols - 1, Y: w.area.Y, W: 1, H: w.area.H})
-			h.key += "R"
-		}
-		if bottom {
-			h.strips = append(h.strips, layout.Rect{X: 0, Y: w.rows - 1, W: w.cols, H: 1})
-			h.key += "B"
+		// Mirror the press resolution so the highlight previews exactly what a
+		// click does: a junction lights the full-span edge; a flat ring strip
+		// lights ONLY the abutting window's own segment, not the whole edge.
+		if _, _, ok := w.ringCornerLocked(x, y); ok {
+			if y >= w.rows-1 {
+				h.strips = append(h.strips, layout.Rect{X: 0, Y: w.rows - 1, W: w.cols, H: 1})
+			} else {
+				col := 0
+				if x >= w.cols-1 {
+					col = w.cols - 1
+				}
+				h.strips = append(h.strips, layout.Rect{X: col, Y: w.area.Y, W: 1, H: w.area.H})
+			}
+			h.key = fmt.Sprintf("span:%d:%d", x, y)
+		} else if pane, dir, found := w.ringEdgeTargetLocked(x, y); found {
+			if r, okr := w.rects[pane]; okr {
+				switch dir {
+				case layout.SplitDown:
+					h.strips = append(h.strips, layout.Rect{X: r.X, Y: w.rows - 1, W: r.W, H: 1})
+				case layout.SplitLeft:
+					h.strips = append(h.strips, layout.Rect{X: 0, Y: r.Y, W: 1, H: r.H})
+				case layout.SplitRight:
+					h.strips = append(h.strips, layout.Rect{X: w.cols - 1, Y: r.Y, W: 1, H: r.H})
+				}
+				h.key = fmt.Sprintf("edge:%s:%d", pane, dir)
+			}
 		}
 	}
 	if h.key != w.hover.key {
