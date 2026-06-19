@@ -63,20 +63,20 @@ shells get a confirm overlay. Ctrl+Shift+E detaches (kitty keyboard
 protocol; the bar's '-' button covers every terminal). Everything else is
 re-encoded per the destination pane's own terminal modes and forwarded.
 
-**Mouse-first, discoverable (pane frames + boundary menus, ruled
-2026-06-11).** Every pane is framed from the start; its top border is a
-bar — title left, [≡] pane-menu button right (Copy/Paste/pane-level
-Splits/Restart Shell/Close Pane), focused pane highlighted. The lower
-pane's bar IS the stacked divider (shared edges render once). Frame
-gestures: press+drag resizes (corners grab both axes), press+release in
-place opens the boundary menu — every border offers all four directions:
-cross-axis at the container level (full extent beside the whole
-stack/row), along-axis inserting at the boundary and naming which
-neighbor donates the space. Non-divider bars are their container's top
-edge; the outer ring is the root's boundary. On terminals reporting bare
-motion (1003; not stock macOS Terminal.app), the boundary under the
-pointer highlights in heavy strokes — corners light every border they
-join. The session bar's project segment (▾) opens the session menu (New
+**Mouse-first, discoverable (pane frames + window-centric edge splits,
+i3-style, ruled 2026-06-19).** Every pane is framed from the start; its top
+border is a bar — title left, [≡] pane-menu button right
+(Copy/Paste/Restart Shell/Close Pane), focused pane highlighted. The lower
+pane's bar IS the stacked divider (shared edges render once). The model is
+i3's: every frame cell is the EDGE of the window beside it, and clicking an
+edge (press+release in place) opens a compact directional menu scoped to
+THAT window — the clicked side's direction first, then the two perpendicular
+ones — each item a `Layout.Split` (same-axis joins the run, perpendicular
+nests a container). The outer ring is segmented per window, so the bottom
+strip under the right pane is the right pane's own bottom edge. Press+drag
+still resizes (corners grab both axes); corners light both strokes on hover
+AND press. On terminals reporting bare motion (1003; not stock macOS
+Terminal.app), the edge under the pointer highlights in heavy strokes. The session bar's project segment (▾) opens the session menu (New
 Tab/Detach/Kill Session…); '+' and '-' stay. Nothing requires
 right-click (macOS Terminal.app never forwards it), but it remains a
 pane-menu accelerator where terminals do. Wheel scrolls daemon-side

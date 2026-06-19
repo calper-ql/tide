@@ -204,13 +204,14 @@ func TestContextMenuSplitCreatesPaneAndBorder(t *testing.T) {
 	w, conn, s := newTestWS(t)
 	s.waitFor(t, "first frame", func() bool { return s.contains("1:") })
 
-	// A click (press+release, no motion) on the outer frame edge opens the
-	// layout menu for the adjacent pane (ratified two-menu model).
+	// A click (press+release, no motion) on the outer-ring left edge opens
+	// the directional split menu for the window abutting it (window-centric
+	// model): the left edge defaults to splitting that pane leftward.
 	w.handleInput(conn, press(0, 5))
 	w.handleInput(conn, release(0, 5))
-	s.waitFor(t, "edge menu", func() bool { return s.contains("New pane left — full height") })
+	s.waitFor(t, "edge menu", func() bool { return s.contains("← New pane left") })
 
-	menuClick(t, w, conn, "New pane left")
+	menuClick(t, w, conn, "← New pane left")
 	s.waitFor(t, "two panes", func() bool {
 		w.mu.Lock()
 		defer w.mu.Unlock()
@@ -448,25 +449,22 @@ func TestPaneMenuButtonAndSessionMenu(t *testing.T) {
 	w, conn, s := newTestWS(t)
 	s.waitFor(t, "first frame", func() bool { return s.contains("1:") })
 
-	// The [≡] button opens the pane menu (ratified: reachable without
-	// right-click — macOS Terminal.app never forwards those).
+	// The [≡] button opens the pane menu (reachable without right-click —
+	// macOS Terminal.app never forwards those).
 	x, y := hitCenter(t, w, hitPaneMenu)
 	w.handleInput(conn, press(x, y))
 	w.handleInput(conn, release(x, y))
 	s.waitFor(t, "pane menu", func() bool { return s.contains("Close Pane") })
 	withWS(w, func() {
-		// Pane-level splits live here now; session actions never do.
-		hasSplit := false
+		// Splitting is spatial now (window edges), so the pane menu carries no
+		// Split items; session actions never appear here either.
 		for _, it := range w.overlay.items {
 			if strings.HasPrefix(it.label, "Kill Session") {
 				t.Fatalf("pane menu must not contain %q", it.label)
 			}
 			if strings.HasPrefix(it.label, "Split") {
-				hasSplit = true
+				t.Fatalf("pane menu must not contain Split items (splitting is on window edges now): %q", it.label)
 			}
-		}
-		if !hasSplit {
-			t.Fatal("pane menu must offer pane-level splits")
 		}
 	})
 	w.handleInput(conn, []byte{0x1b}) // Esc closes
@@ -611,10 +609,11 @@ func TestCornerDragResizesBothAxes(t *testing.T) {
 	})
 }
 
-// TestDividerSplitRightSpansFullHeight pins the ratified boundary
-// semantics: from the divider between two stacked panes, "new pane right"
-// sits beside the WHOLE stack at full height — not beside one neighbor.
-func TestDividerSplitRightSpansFullHeight(t *testing.T) {
+// TestEdgeMenuSplitsOneWindow pins the window-centric model: the divider
+// between two stacked panes is the LOWER pane's top edge, and "new pane
+// right" from it splits just that one window — the new pane sits beside the
+// lower pane only, not the whole stack at full height.
+func TestEdgeMenuSplitsOneWindow(t *testing.T) {
 	w, conn, s := newTestWS(t)
 	s.waitFor(t, "first frame", func() bool { return s.contains("1:") })
 	withWS(w, func() { w.actionSplitLocked(w.lay.FocusedPane(), layout.SplitDown) })
@@ -633,8 +632,8 @@ func TestDividerSplitRightSpansFullHeight(t *testing.T) {
 	})
 	w.handleInput(conn, press(barX, barY))
 	w.handleInput(conn, release(barX, barY))
-	s.waitFor(t, "divider menu", func() bool { return s.contains("New pane right — full height") })
-	menuClick(t, w, conn, "New pane right")
+	s.waitFor(t, "edge menu", func() bool { return s.contains("→ New pane right") })
+	menuClick(t, w, conn, "→ New pane right")
 
 	s.waitFor(t, "three panes", func() bool {
 		w.mu.Lock()
@@ -642,29 +641,24 @@ func TestDividerSplitRightSpansFullHeight(t *testing.T) {
 		return w.lay.CountPanes() == 3
 	})
 	withWS(w, func() {
-		newPane := w.lay.FocusedPane()
-		r, ok := w.rects[newPane]
+		r, ok := w.rects[w.lay.FocusedPane()]
 		if !ok {
 			t.Fatal("new pane has no rect")
 		}
-		if r.H != w.area.H {
-			t.Fatalf("new pane height = %d, want full area height %d (beside the stack, not one pane)", r.H, w.area.H)
-		}
-		if r.Y != w.area.Y {
-			t.Fatalf("new pane top = %d, want area top %d", r.Y, w.area.Y)
+		if r.Y <= w.area.Y || r.H >= w.area.H {
+			t.Fatalf("new pane rect = %+v; a window-scoped split must sit beside the LOWER pane only (Y>%d, H<%d)",
+				r, w.area.Y, w.area.H)
 		}
 	})
 }
 
-// TestDividerInsertHereGoesBetween pins the along-axis boundary action.
-func TestDividerInsertHereGoesBetween(t *testing.T) {
+// TestDividerTopEdgeInsertsAbove pins that a stacked divider is the LOWER
+// pane's top edge: "new pane above" from it (the menu's default) inserts a
+// pane between the two, keeping one full-width stack.
+func TestDividerTopEdgeInsertsAbove(t *testing.T) {
 	w, conn, s := newTestWS(t)
 	s.waitFor(t, "first frame", func() bool { return s.contains("1:") })
-	var topPane string
-	withWS(w, func() {
-		topPane = w.lay.FocusedPane()
-		w.actionSplitLocked(topPane, layout.SplitDown)
-	})
+	withWS(w, func() { w.actionSplitLocked(w.lay.FocusedPane(), layout.SplitDown) })
 	var barX, barY int
 	s.waitFor(t, "divider bar in hitmap", func() bool {
 		w.mu.Lock()
@@ -679,8 +673,8 @@ func TestDividerInsertHereGoesBetween(t *testing.T) {
 	})
 	w.handleInput(conn, press(barX, barY))
 	w.handleInput(conn, release(barX, barY))
-	s.waitFor(t, "divider menu", func() bool { return s.contains("New pane down — from the pane below") })
-	menuClick(t, w, conn, "New pane down")
+	s.waitFor(t, "edge menu", func() bool { return s.contains("↑ New pane above") })
+	menuClick(t, w, conn, "↑ New pane above")
 	s.waitFor(t, "three stacked panes", func() bool {
 		w.mu.Lock()
 		defer w.mu.Unlock()

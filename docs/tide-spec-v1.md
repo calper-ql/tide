@@ -237,7 +237,8 @@ Capabilities ship as first-party standalone tools that attach to the session
   bar's project-name segment opens the session menu (New Tab, Detach,
   Kill Session…); '-' quick-detach and '+' stay. Focus is indicated by
   frame styling.
-- **Boundary semantics and hover** *(ruled 2026-06-11, refinement)*.
+- **Boundary semantics and hover** *(ruled 2026-06-11, refinement;
+  superseded 2026-06-19 by "Window-centric edge splits")*.
   Frame elements are boundaries of their CONTAINER, not handles of a
   neighboring pane, and every border offers all four directions: the
   cross-axis pair acts at the container level (from the divider between
@@ -253,6 +254,26 @@ Capabilities ship as first-party standalone tools that attach to the session
   boundary under the pointer highlights — corners light every border they
   join, previewing what the gesture affects; elsewhere the chrome degrades
   to no highlight, never to broken clicks.
+- **Window-centric edge splits — i3-style** *(ruled 2026-06-19;
+  supersedes "Boundary semantics and hover")*. Frame elements are the
+  EDGES OF THE ADJACENT WINDOW, not boundaries of a container — the model
+  is i3's: pick a window, pick a side, split it that way. Every window has
+  four reachable edges: its top bar is the top edge; a shared vertical
+  border is the right edge of the pane on its left; the outer ring is
+  SEGMENTED per window, so the bottom strip under the right pane is that
+  pane's own bottom edge (not the whole-width ring). Clicking an edge
+  (press+release in place) opens a compact directional menu scoped to that
+  one window — the clicked side's direction first (the default), then the
+  two perpendicular directions ("↓ New pane below", "← New pane left", …);
+  the chosen item runs `Layout.Split(pane, dir)` (i3 semantics: same-axis
+  joins the run, perpendicular nests a container). Press+drag still resizes
+  where a neighbor exists. Corners (a vertical border meeting a horizontal
+  divider) are 2-axis resize handles: hover AND press light both strokes;
+  they no longer open a split menu. The five container-level boundary menus
+  ("full height/width", "from the pane above/below") are gone, as are the
+  `[≡]` menu's four Split items — splitting is spatial now, the `[≡]` menu
+  keeps Copy/Paste/Restart/Close. The mouse analog of i3's window MOVE
+  (drag a bar to re-drop it in the tree) is the next increment.
 
 - **`teddy` — the editor tool** *(ruled 2026-06-17; working name was
   `tide-edit`)*. A standalone terminal editor binary, a product in its own
