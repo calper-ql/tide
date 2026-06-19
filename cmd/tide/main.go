@@ -139,7 +139,19 @@ const enterSequences = "\x1b[?1049h\x1b[?1002h\x1b[?1003h\x1b[?1006h\x1b[?2004h\
 const resetSequences = "\x1b[<u\x1b[?1004l\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[?1002l" +
 	"\x1b[0m\x1b[?25h\x1b[?1049l"
 
+// errNested is returned when tide is launched from inside one of its own
+// panes ($TIDE_SESSION is set there). Attaching would stack a second
+// alt-screen + mouse/keyboard regime inside a pane — the tmux-in-tmux trap
+// — so attach refuses it. ls/kill/restart from within a pane are fine; they
+// never attach.
+var errNested = errors.New("already inside a tide session — refusing to nest tide in itself\n" +
+	"  • detach first: Ctrl+Shift+E (or the bar's '-')\n" +
+	"  • nest anyway: unset TIDE_SESSION")
+
 func attach(rt, target string, here bool) error {
+	if os.Getenv("TIDE_SESSION") != "" {
+		return errNested
+	}
 	root, foundRepo, err := resolveRoot(target, here)
 	if err != nil {
 		return err

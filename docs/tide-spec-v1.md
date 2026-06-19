@@ -54,6 +54,12 @@ federation of foreign tools with N keybind dialects.
   ends the current path's session explicitly.
 - Detach leaves the session running, always. Killing the terminal *is* a
   valid detach.
+- **No nesting** *(ruled 2026-06-19)*. Panes always carry `TIDE_SESSION`, so
+  `tide` launched inside one of its own panes refuses to attach (stacking a
+  second alt-screen + mouse/keyboard regime is the tmux-in-tmux trap). The
+  message points to detach, and to `unset TIDE_SESSION` as the force escape
+  hatch. `ls`/`kill`/`restart` from within a pane stay allowed — they never
+  attach.
 
 ## Platforms
 

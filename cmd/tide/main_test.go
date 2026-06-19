@@ -1,12 +1,22 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/calper-ql/tide/internal/protocol"
 )
+
+func TestAttachRefusesNestingInsideTideSession(t *testing.T) {
+	// A shell inside a tide pane always has TIDE_SESSION set (pane.go), so
+	// running `tide` there must refuse rather than stack a session in itself.
+	t.Setenv("TIDE_SESSION", "pane-abc123:/run/user/1000/tide/d.sock")
+	if err := attach(t.TempDir(), "", false); !errors.Is(err, errNested) {
+		t.Fatalf("attach inside a tide pane = %v, want errNested", err)
+	}
+}
 
 func TestKillCandidatesPrefersExactSessionOverGitWalk(t *testing.T) {
 	tmp, err := filepath.EvalSymlinks(t.TempDir())
