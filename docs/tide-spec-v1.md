@@ -273,13 +273,20 @@ Capabilities ship as first-party standalone tools that attach to the session
   two perpendicular directions ("↓ New pane below", "← New pane left", …);
   the chosen item runs `Layout.Split(pane, dir)` (i3 semantics: same-axis
   joins the run, perpendicular nests a container). Press+drag still resizes
-  where a neighbor exists. Corners (a vertical border meeting a horizontal
-  divider) are 2-axis resize handles: hover AND press light both strokes;
-  they no longer open a split menu. The five container-level boundary menus
-  ("full height/width", "from the pane above/below") are gone, as are the
-  `[≡]` menu's four Split items — splitting is spatial now, the `[≡]` menu
-  keeps Copy/Paste/Restart/Close. The mouse analog of i3's window MOVE
-  (drag a bar to re-drop it in the tree) is the next increment.
+  where a neighbor exists.
+  - **Corners/junctions = full-span (container-level)** *(refined
+    2026-06-19)*. The flat edges above are window-level; the junction cells
+    where boundaries meet (`┬ ┴ ├ ┤ ┼`, and the ┴ where a divider reaches
+    the bottom ring) open a full-span menu instead: "above/below — full
+    width" of the container a vertical boundary divides, "left/right — full
+    height" of the container a horizontal one divides (via `SplitNode` on the
+    container node). This is what makes "full-width pane below an L|R split"
+    reachable — click the ┴ between them. An internal corner (border meets
+    divider) still resizes both axes on drag. Only the per-divider/per-border
+    *cross-axis* full-span menus and the `[≡]` menu's four Split items were
+    removed; the `[≡]` menu keeps Copy/Paste/Restart/Close. The mouse analog
+    of i3's window MOVE (drag a bar to re-drop it in the tree) is the next
+    increment.
 
 - **`teddy` — the editor tool** *(ruled 2026-06-17; working name was
   `tide-edit`)*. A standalone terminal editor binary, a product in its own

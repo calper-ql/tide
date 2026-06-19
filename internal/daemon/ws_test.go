@@ -652,6 +652,51 @@ func TestEdgeMenuSplitsOneWindow(t *testing.T) {
 	})
 }
 
+// TestRingCornerSplitsFullWidth pins the container-level (full-span) split:
+// from the ┴ where the L|R divider meets the bottom ring, "below — full
+// width" drops a pane spanning BOTH columns, not just one window.
+func TestRingCornerSplitsFullWidth(t *testing.T) {
+	w, conn, s := newTestWS(t)
+	s.waitFor(t, "first frame", func() bool { return s.contains("1:") })
+	withWS(w, func() { w.actionSplitLocked(w.lay.FocusedPane(), layout.SplitRight) }) // L | R
+
+	var bx, by int
+	s.waitFor(t, "vertical border", func() bool {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		for _, b := range w.borders {
+			if b.Vertical {
+				bx, by = b.Rect.X, w.rows-1 // the ┴ on the bottom ring
+				return true
+			}
+		}
+		return false
+	})
+	w.handleInput(conn, press(bx, by))
+	w.handleInput(conn, release(bx, by))
+	s.waitFor(t, "span menu", func() bool { return s.contains("↓ New pane below — full width") })
+	menuClick(t, w, conn, "↓ New pane below — full width")
+
+	s.waitFor(t, "three panes", func() bool {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		return w.lay.CountPanes() == 3
+	})
+	withWS(w, func() {
+		r, ok := w.rects[w.lay.FocusedPane()]
+		if !ok {
+			t.Fatal("new pane has no rect")
+		}
+		if r.W != w.area.W {
+			t.Fatalf("new pane width = %d, want full area width %d (spans both columns)", r.W, w.area.W)
+		}
+		root := w.lay.ActiveTab().Root
+		if root.Dir != layout.SplitDown || len(root.Children) != 2 {
+			t.Fatalf("root should be a 2-child stack after a full-width split below, got %+v", root)
+		}
+	})
+}
+
 // TestDividerTopEdgeInsertsAbove pins that a stacked divider is the LOWER
 // pane's top edge: "new pane above" from it (the menu's default) inserts a
 // pane between the two, keeping one full-width stack.

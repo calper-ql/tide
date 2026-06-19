@@ -235,8 +235,6 @@ func (w *ws) routeMouseLocked(conn *protocol.Conn, ev input.Event) {
 			w.pending = nil
 			if !p.moved && p.menu != nil {
 				p.menu(w, ev.X, ev.Y)
-			} else if !p.moved && (p.hasV || p.hasH) {
-				w.clearHoverLocked() // corner press feedback with no drag following
 			}
 		}
 		return
@@ -322,10 +320,11 @@ func (w *ws) routeMouseLocked(conn *protocol.Conn, ev input.Event) {
 				p.v, p.hasV = vb, true
 			}
 			if p.hasH && p.hasV {
-				// A divider bar meeting a vertical border is a corner: a
-				// 2-axis resize handle, no split menu. Light both strokes so
-				// the grab is confirmed even without 1003 hover.
-				w.highlightCornerLocked(p.v, hit.pane)
+				// A divider bar meeting a vertical border is a corner: drag
+				// resizes both axes, a click offers the full-span splits of
+				// the two containers meeting here.
+				vb, hb := p.v, p.h
+				p.menu = func(w *ws, x, y int) { w.openSpanMenuLocked(vb.Node, hb.Node, x, y) }
 			} else {
 				// The bar is this window's top edge: split it upward.
 				pane := hit.pane
@@ -334,20 +333,29 @@ func (w *ws) routeMouseLocked(conn *protocol.Conn, ev input.Event) {
 			w.pending = p
 		case hitBorder:
 			p := &pendingPress{x: ev.X, y: ev.Y, v: hit.border, hasV: true}
+			vb := hit.border
 			if hb, ok := w.cornerHBorderLocked(ev.X, ev.Y); ok {
-				// Corner: resize both axes, highlight both, no menu.
+				// Corner (border meets a divider): drag resizes both axes, a
+				// click offers the full-span splits of both containers.
 				p.h, p.hasH = hb, true
-				w.highlightCornerLocked(hit.border, w.paneAtBarLocked(hb.Rect))
-			} else if left := w.paneLeftOfBorderLocked(hit.border, ev.Y); left != "" {
-				// A shared vertical border is the right edge of the pane on
-				// its left: split that window rightward.
+				p.menu = func(w *ws, x, y int) { w.openSpanMenuLocked(vb.Node, hb.Node, x, y) }
+			} else if ev.Y == vb.Rect.Y {
+				// The border's top end (the ┬): full-span above/below the
+				// container it divides.
+				p.menu = func(w *ws, x, y int) { w.openSpanMenuLocked(vb.Node, nil, x, y) }
+			} else if left := w.paneLeftOfBorderLocked(vb, ev.Y); left != "" {
+				// Mid-border: the right edge of the pane on its left.
 				p.menu = func(w *ws, x, y int) { w.openEdgeMenuLocked(left, layout.SplitRight, x, y) }
 			}
 			w.pending = p
 		case hitFrameEdge:
-			// The outer ring, segmented per window: each strip is the
-			// abutting window's own left/right/bottom edge.
-			if pane, dir, ok := w.ringEdgeTargetLocked(ev.X, ev.Y); ok {
+			// A ring junction (┴ where a border meets the bottom, ├/┤ where a
+			// divider meets a side) offers full-span splits; the flat ring is
+			// the abutting window's own left/right/bottom edge.
+			if vNode, hNode, ok := w.ringCornerLocked(ev.X, ev.Y); ok {
+				w.pending = &pendingPress{x: ev.X, y: ev.Y,
+					menu: func(w *ws, x, y int) { w.openSpanMenuLocked(vNode, hNode, x, y) }}
+			} else if pane, dir, ok := w.ringEdgeTargetLocked(ev.X, ev.Y); ok {
 				w.pending = &pendingPress{x: ev.X, y: ev.Y,
 					menu: func(w *ws, x, y int) { w.openEdgeMenuLocked(pane, dir, x, y) }}
 			} else {
@@ -938,30 +946,81 @@ func (w *ws) paneLeftOfBorderLocked(bd layout.Border, y int) string {
 	return ""
 }
 
-// highlightCornerLocked shows a corner's 2-axis resize grab: the vertical
-// border as a heavy stroke and the horizontal divider as a heavy bar. It
-// runs on PRESS so the grab is confirmed even on terminals that never
-// report bare motion (mode 1003).
-func (w *ws) highlightCornerLocked(vb layout.Border, barPane string) {
-	h := hoverState{
-		menuItem: -1,
-		key:      fmt.Sprintf("press-corner:%d:%s", vb.Rect.X, barPane),
-		strips:   []layout.Rect{vb.Rect},
+// actionSplitNodeLocked inserts a fresh pane beside an arbitrary layout
+// node — the full-span (container-level) split executor. The node pointer
+// was captured when the menu opened; SplitNode revalidates it against the
+// tree, so a layout that changed underneath fails loudly, not silently.
+func (w *ws) actionSplitNodeLocked(tab int, target *layout.Node, d layout.Dir) {
+	id := newPaneID()
+	p, err := w.spawnPane(id, nil, max(w.area.W/2, layout.MinPaneW), max(w.area.H/2, layout.MinPaneH))
+	if err != nil {
+		w.flashStatusLocked("split failed: " + err.Error())
+		return
 	}
-	if barPane != "" {
-		h.bars = map[string]bool{barPane: true}
+	if err := w.lay.SplitNode(tab, target, d, id); err != nil {
+		go p.shutdown()
+		w.flashStatusLocked("split failed: " + err.Error())
+		return
 	}
-	w.hover = h
+	w.panes[id] = p
+	w.clearSelectionLocked()
+	w.recomputeLocked()
+	w.checkpointLayoutLocked()
 	w.markAllDirtyLocked()
 }
 
-// clearHoverLocked drops any highlight (e.g. a corner press that ended
-// without a drag).
-func (w *ws) clearHoverLocked() {
-	if w.hover.key != "" || len(w.hover.strips) > 0 || len(w.hover.bars) > 0 {
-		w.hover = hoverState{menuItem: -1}
-		w.markAllDirtyLocked()
+// spanItem builds a full-span split entry against a container node.
+func (w *ws) spanItem(label string, node *layout.Node, d layout.Dir) menuItem {
+	tab := w.lay.Active
+	return menuItem{label: label, enabled: true, run: func(w *ws, _ *protocol.Conn) {
+		w.actionSplitNodeLocked(tab, node, d)
+	}}
+}
+
+// openSpanMenuLocked is the corner (junction) menu: the container-level,
+// full-span counterpart to the per-window edge menu. vNode is the container
+// a vertical boundary divides — splitting it up/down spans its full WIDTH;
+// hNode is the container a horizontal boundary divides — splitting it
+// left/right spans its full HEIGHT. Either may be nil (a ring junction
+// touches only one).
+func (w *ws) openSpanMenuLocked(vNode, hNode *layout.Node, x, y int) {
+	var items []menuItem
+	if vNode != nil {
+		items = append(items,
+			w.spanItem("↑ New pane above — full width", vNode, layout.SplitUp),
+			w.spanItem("↓ New pane below — full width", vNode, layout.SplitDown),
+		)
 	}
+	if hNode != nil {
+		items = append(items,
+			w.spanItem("← New pane left — full height", hNode, layout.SplitLeft),
+			w.spanItem("→ New pane right — full height", hNode, layout.SplitRight),
+		)
+	}
+	if len(items) == 0 {
+		return
+	}
+	w.overlay = &overlay{x: x, y: y, title: "Across", items: items}
+	w.markAllDirtyLocked()
+}
+
+// ringCornerLocked detects an outer-ring junction and returns the container
+// nodes to span: a vertical border reaching the bottom ring (┴ → full-width
+// above/below its container) or a horizontal divider reaching a side ring
+// (├/┤ → full-height left/right its container).
+func (w *ws) ringCornerLocked(x, y int) (vNode, hNode *layout.Node, ok bool) {
+	bottom := y >= w.rows-1
+	side := x <= 0 || x >= w.cols-1
+	for i := range w.borders {
+		b := w.borders[i]
+		if bottom && b.Vertical && absInt(b.Rect.X-x) <= 1 && b.Rect.Y+b.Rect.H >= w.rows-1 {
+			vNode = b.Node
+		}
+		if side && !b.Vertical && b.Rect.Y == y {
+			hNode = b.Node
+		}
+	}
+	return vNode, hNode, vNode != nil || hNode != nil
 }
 
 // openSessionMenuLocked lives behind the session bar's project segment

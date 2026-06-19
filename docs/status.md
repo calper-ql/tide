@@ -73,10 +73,13 @@ edge (press+release in place) opens a compact directional menu scoped to
 THAT window — the clicked side's direction first, then the two perpendicular
 ones — each item a `Layout.Split` (same-axis joins the run, perpendicular
 nests a container). The outer ring is segmented per window, so the bottom
-strip under the right pane is the right pane's own bottom edge. Press+drag
-still resizes (corners grab both axes); corners light both strokes on hover
-AND press. On terminals reporting bare motion (1003; not stock macOS
-Terminal.app), the edge under the pointer highlights in heavy strokes. The session bar's project segment (▾) opens the session menu (New
+strip under the right pane is the right pane's own bottom edge. Junction
+cells (┬┴├┤┼, and the ┴ where a divider meets the bottom ring) instead open
+a full-span menu — full-width above/below, or full-height left/right, of the
+container the boundary divides — so a full-width pane below an L|R split is
+one click on the ┴. Press+drag still resizes (corners grab both axes). On
+terminals reporting bare motion (1003; not stock macOS Terminal.app), the
+edge under the pointer highlights in heavy strokes. The session bar's project segment (▾) opens the session menu (New
 Tab/Detach/Kill Session…); '+' and '-' stay. Nothing requires
 right-click (macOS Terminal.app never forwards it), but it remains a
 pane-menu accelerator where terminals do. Wheel scrolls daemon-side
