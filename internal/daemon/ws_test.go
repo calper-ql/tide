@@ -652,6 +652,53 @@ func TestEdgeMenuSplitsOneWindow(t *testing.T) {
 	})
 }
 
+func TestBarJunctionGlyph(t *testing.T) {
+	cases := []struct {
+		up, left, right bool
+		want            string
+	}{
+		{false, true, true, "┬"},  // border drops below only (full-width pane above a split)
+		{true, true, true, "┼"},   // continuous cross
+		{true, false, true, "├"},  // left ring at a divider row
+		{true, true, false, "┤"},  // right ring at a divider row
+		{false, false, true, "╭"}, // top-left corner
+		{false, true, false, "╮"}, // top-right corner
+	}
+	for _, c := range cases {
+		if g := barJunction(c.up, c.left, c.right); g != c.want {
+			t.Errorf("barJunction(up=%v,left=%v,right=%v) = %q, want %q", c.up, c.left, c.right, g, c.want)
+		}
+	}
+}
+
+// TestSplitAboveLeavesTeeNotCross pins the junction fix: after dropping a
+// full-width pane above an L|R split, the L|R border starts at the divider
+// row with nothing above it, so its top junction is a ┬ (no line above), not
+// a ├/┤/┼ poking up into the new pane.
+func TestSplitAboveLeavesTeeNotCross(t *testing.T) {
+	w, _, s := newTestWS(t)
+	s.waitFor(t, "first frame", func() bool { return s.contains("1:") })
+	withWS(w, func() {
+		w.actionSplitLocked(w.lay.FocusedPane(), layout.SplitRight) // L | R
+		w.actionSplitNodeLocked(w.lay.Active, w.lay.ActiveTab().Root, layout.SplitUp)
+	})
+	withWS(w, func() {
+		var vb *layout.Border
+		for i := range w.borders {
+			if w.borders[i].Vertical {
+				vb = &w.borders[i]
+			}
+		}
+		if vb == nil {
+			t.Fatal("no vertical border between L and R")
+		}
+		if w.lineAboveLocked(vb.Rect.X, vb.Rect.Y) {
+			t.Fatalf("border at (%d,%d) reports a line above it — its top junction would render ┼/├/┤, not ┬",
+				vb.Rect.X, vb.Rect.Y)
+		}
+	})
+}
+
 // TestRingHoverLightsOnlyThePaneSegment pins that hovering a flat ring edge
 // previews only the abutting window's own segment — hovering under the right
 // pane must not light the left pane's bottom.

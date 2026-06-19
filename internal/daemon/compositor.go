@@ -349,20 +349,13 @@ func (w *ws) renderPaneBarLocked(b *bytes.Buffer, id string, r layout.Rect, focu
 	if w.hover.bars[id] {
 		style, stroke = thHover, "━" // the boundary under the pointer
 	}
-	// Flanking junctions live in the neighboring border/ring columns.
-	atTop := r.Y == w.area.Y
-	left, right := "├", "┤"
-	if atTop {
-		left, right = "┬", "┬"
-		if r.X-1 == 0 {
-			left = "╭"
-		}
-		if r.X+r.W == w.cols-1 {
-			right = "╮"
-		}
-	} else if r.X-1 == 0 {
-		left = "├"
-	}
+	// Flanking junctions live in the neighboring border/ring columns. Their
+	// glyph depends on whether the vertical line continues ABOVE this row: a
+	// bar whose border only drops downward (e.g. a full-width pane was split
+	// in above it) gets a ┬, not a ├/┤ that would poke up into the pane above.
+	leftCol, rightCol := r.X-1, r.X+r.W
+	left := barJunction(w.lineAboveLocked(leftCol, r.Y), leftCol != 0, true)
+	right := barJunction(w.lineAboveLocked(rightCol, r.Y), true, rightCol != w.cols-1)
 	cup(b, r.Y, r.X-1)
 	b.WriteString(style + left)
 
@@ -389,6 +382,50 @@ func (w *ws) renderPaneBarLocked(b *bytes.Buffer, id string, r layout.Rect, focu
 		hitRegion{rect: layout.Rect{X: r.X, Y: r.Y, W: r.W, H: 1}, kind: hitPaneBar, pane: id, border: bd, hasBorder: hasBorder},
 		hitRegion{rect: layout.Rect{X: r.X + r.W - 4, Y: r.Y, W: 4, H: 1}, kind: hitPaneMenu, pane: id},
 	)
+}
+
+// barJunction picks the box-drawing glyph for a pane bar's flanking column.
+// A bar always continues downward (the border/ring below it), so the choice
+// turns on up (a vertical line also above) and left/right (the bar extends
+// to each side): e.g. up&left&right → ┼, !up&left&right → ┬ (a border that
+// only drops below, the top of an L|R split with a full-width pane above).
+func barJunction(up, left, right bool) string {
+	switch {
+	case up && left && right:
+		return "┼"
+	case up && right: // up && !left
+		return "├"
+	case up && left: // up && !right
+		return "┤"
+	case left && right: // !up
+		return "┬"
+	case right: // !up && !left
+		return "╭"
+	case left: // !up && !right
+		return "╮"
+	default:
+		return "┬"
+	}
+}
+
+// lineAboveLocked reports whether a vertical frame line occupies the cell
+// directly above (col, y): the outer ring runs the full height, an internal
+// vertical border only where its span reaches. Above the area's top row sits
+// the session bar, which carries no frame line.
+func (w *ws) lineAboveLocked(col, y int) bool {
+	if y <= w.area.Y {
+		return false
+	}
+	if col == 0 || col == w.cols-1 {
+		return true
+	}
+	for i := range w.borders {
+		b := w.borders[i]
+		if b.Vertical && b.Rect.X == col && b.Rect.Y <= y-1 && y-1 < b.Rect.Y+b.Rect.H {
+			return true
+		}
+	}
+	return false
 }
 
 // renderHoverLocked overdraws the hovered boundary strips with heavy
