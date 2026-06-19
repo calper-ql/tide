@@ -114,6 +114,10 @@ func (w *ws) renderLocked() []byte {
 	var b bytes.Buffer
 	b.WriteString("\x1b[?25l" + sgrReset)
 	full := w.allDirty
+	// Chrome-only repaints (hover transitions) redraw the frame, bars, and
+	// hover strokes in place — no screen clear, no content redraw — so moving
+	// the pointer across an edge doesn't blank and rebuild the whole screen.
+	chrome := full || w.chromeDirty
 	if full {
 		b.WriteString("\x1b[2J")
 	}
@@ -122,7 +126,7 @@ func (w *ws) renderLocked() []byte {
 	w.renderBarLocked(&b)
 
 	if tab := w.lay.ActiveTab(); tab != nil {
-		if full {
+		if chrome {
 			w.renderFrameLocked(&b)
 		}
 		// Stacked dividers are pane bars: index the horizontal borders by
@@ -142,7 +146,7 @@ func (w *ws) renderLocked() []byte {
 				w.renderPaneContentLocked(&b, id, c)
 			}
 		}
-		if full {
+		if chrome {
 			w.renderHoverLocked(&b)
 		}
 		for _, bd := range w.borders {
@@ -163,6 +167,7 @@ func (w *ws) renderLocked() []byte {
 	w.placeCursorLocked(&b)
 	w.dirtyPanes = map[string]bool{}
 	w.allDirty = false
+	w.chromeDirty = false
 	return b.Bytes()
 }
 

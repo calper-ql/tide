@@ -114,10 +114,11 @@ type ws struct {
 	closing  bool
 	killed   bool // session explicitly ended: checkpoints must stop
 
-	dirtyPanes map[string]bool
-	allDirty   bool
-	renderSig  chan struct{}
-	quit       chan struct{}
+	dirtyPanes  map[string]bool
+	allDirty    bool
+	chromeDirty bool // chrome-only repaint (frame+bars+hover), no screen clear or content redraw
+	renderSig   chan struct{}
+	quit        chan struct{}
 }
 
 // newWS builds the workspace for a session, restoring layout and pane
@@ -449,6 +450,15 @@ func (w *ws) markDirty(paneID string) {
 
 func (w *ws) markAllDirtyLocked() {
 	w.allDirty = true
+	w.signalRender()
+}
+
+// markChromeDirtyLocked requests a chrome-only repaint: the frame, pane bars,
+// and hover strokes are redrawn in place, but the screen is NOT cleared and
+// pane content is NOT repainted. Used for hover transitions, where only border
+// cells change — clearing the whole screen for that is what causes the flicker.
+func (w *ws) markChromeDirtyLocked() {
+	w.chromeDirty = true
 	w.signalRender()
 }
 

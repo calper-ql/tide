@@ -488,7 +488,7 @@ func (w *ws) updateHoverLocked(x, y int) {
 	}
 	if h.key != w.hover.key {
 		w.hover = h
-		w.markAllDirtyLocked()
+		w.markChromeDirtyLocked()
 	}
 }
 

@@ -739,6 +739,53 @@ func TestRingHoverLightsOnlyThePaneSegment(t *testing.T) {
 	})
 }
 
+// TestHoverRepaintDoesNotClearScreen pins the no-flicker fix: a hover
+// transition is a chrome-only repaint — it must NOT emit a full-screen clear
+// (\x1b[2J) or be promoted to an all-dirty render, which would blank and
+// rebuild the whole screen (incl. every pane's content) on each pointer step.
+func TestHoverRepaintDoesNotClearScreen(t *testing.T) {
+	w, _, s := newTestWS(t)
+	s.waitFor(t, "first frame", func() bool { return s.contains("1:") })
+	withWS(w, func() { w.actionSplitLocked(w.lay.FocusedPane(), layout.SplitRight) }) // L | R
+
+	var bx, by int
+	s.waitFor(t, "vertical border", func() bool {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		for _, b := range w.borders {
+			if b.Vertical {
+				bx, by = b.Rect.X, b.Rect.Y+b.Rect.H/2 // mid-border, clear of junctions
+				return true
+			}
+		}
+		return false
+	})
+
+	withWS(w, func() {
+		w.renderLocked() // rebuild the hitmap for the post-split layout
+		// Clean slate, then move the pointer onto the divider.
+		w.hover = hoverState{}
+		w.allDirty, w.chromeDirty = false, false
+		w.updateHoverLocked(bx, by)
+		if len(w.hover.strips) == 0 {
+			t.Fatalf("hover over the divider lit nothing; strips=%+v", w.hover.strips)
+		}
+		if w.allDirty {
+			t.Fatal("hover promoted to an all-dirty render (full clear + content redraw)")
+		}
+		if !w.chromeDirty {
+			t.Fatal("hover did not request a chrome repaint")
+		}
+		frame := w.renderLocked()
+		if bytes.Contains(frame, []byte("\x1b[2J")) {
+			t.Fatal("hover frame cleared the whole screen (the flicker)")
+		}
+		if !bytes.Contains(frame, []byte("┃")) {
+			t.Fatal("chrome repaint did not draw the hover highlight")
+		}
+	})
+}
+
 // TestRingCornerSplitsFullWidth pins the container-level (full-span) split:
 // from the ┴ where the L|R divider meets the bottom ring, "below — full
 // width" drops a pane spanning BOTH columns, not just one window.
