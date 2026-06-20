@@ -101,6 +101,15 @@ func (w *ws) routeKeyLocked(conn *protocol.Conn, ev input.Event) {
 		return
 	}
 
+	// F8 re-grabs the mouse after the bar released it — the only way back
+	// once the pointer belongs to the terminal (the button can't be clicked).
+	// Intercepted ONLY while released, so apps keep F8 otherwise; works with
+	// an overlay open (a menu can't be dismissed by mouse then either).
+	if w.mouseReleased && ev.Key == input.KeyF8 {
+		w.setMouseReleasedLocked(false)
+		return
+	}
+
 	if w.overlay != nil {
 		switch ev.Key {
 		case input.KeyEscape:
@@ -175,6 +184,11 @@ func (w *ws) encodeOptsLocked(p *pane) input.EncodeOpts {
 }
 
 func (w *ws) routeMouseLocked(conn *protocol.Conn, ev input.Event) {
+	// Mouse released to the terminal: ignore any reports still in flight.
+	if w.mouseReleased {
+		return
+	}
+
 	// An app-forwarded press grabs the mouse for its pane: motion and the
 	// release must reach the SAME pane even when the pointer crosses a
 	// border, or the app is left with a stuck button and a neighbor gets a
@@ -308,6 +322,10 @@ func (w *ws) routeMouseLocked(conn *protocol.Conn, ev input.Event) {
 			w.actionNewTabLocked()
 		case hitDetach:
 			w.detachClientLocked(conn)
+		case hitMouseToggle:
+			// Only reachable while grabbed (once released no clicks arrive):
+			// a press hands the mouse to the terminal.
+			w.setMouseReleasedLocked(true)
 		case hitSessionMenu:
 			w.openSessionMenuLocked(ev.X, ev.Y)
 		case hitPaneMenu:
@@ -437,7 +455,7 @@ func (w *ws) updateHoverLocked(x, y int) {
 		h.key = fmt.Sprintf("mi:%d", hit.item)
 	case hitOverlayBody:
 		h.key = "overlay"
-	case hitTabLabel, hitNewTab, hitDetach, hitSessionMenu:
+	case hitTabLabel, hitNewTab, hitDetach, hitSessionMenu, hitMouseToggle:
 		h.barKind, h.barTab = hit.kind, hit.tab
 		h.key = fmt.Sprintf("bb:%d:%d", hit.kind, hit.tab)
 	case hitPaneBar, hitPaneMenu:

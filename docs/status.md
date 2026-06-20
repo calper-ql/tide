@@ -63,6 +63,16 @@ shells get a confirm overlay. Ctrl+Shift+E detaches (kitty keyboard
 protocol; the bar's '-' button covers every terminal). Everything else is
 re-encoded per the destination pane's own terminal modes and forwarded.
 
+**Mouse-capture toggle ("mouse" button on the bar).** tide grabs the mouse
+(1002/1003/1006) for click-to-resize, menus, and hover, which suppresses the
+terminal's own select-and-copy — the thing that "just works" in default tmux.
+The bar's `mouse` button releases those three modes (via an escape on the
+render stream) so the terminal owns the pointer again and native
+select-and-copy works in every emulator, including ones that drop OSC 52
+(Terminal.app). It is session-wide and inherited by late-joining clients;
+**F8 re-grabs** (the only way back once the pointer is gone — stated
+persistently in the bar). Released mouse reports are ignored.
+
 **Mouse-first, discoverable (pane frames + window-centric edge splits,
 i3-style, ruled 2026-06-19).** Every pane is framed from the start; its top
 border is a bar — title left, [≡] pane-menu button right

@@ -33,6 +33,7 @@ const (
 	hitFrameEdge   // outer ring cells; owner pane resolved by adjacency
 	hitMenuItem
 	hitOverlayBody // inside an overlay but not on an item: swallow the click
+	hitMouseToggle // session-bar button: release/grab tide's mouse capture
 )
 
 type hitRegion struct {
@@ -93,6 +94,19 @@ const (
 	thMenuDim   = "\x1b[0;100;90m" // disabled item
 	thMenuHover = "\x1b[0;7;1;36m" // item under the pointer
 	thDead      = "\x1b[0;2;31m"   // exited pane bar
+	thWarnBar   = "\x1b[0;7;1;93m" // bar warning pill: mouse released
+)
+
+// Mouse-capture toggle. tide normally grabs the mouse (1002 drag, 1003
+// motion, 1006 SGR) for click-to-resize, menus, and hover. Releasing those
+// three hands the pointer back to the user's terminal so its own
+// select-and-copy works (like default tmux); the client's other modes
+// (alt-screen, bracketed paste, focus) are untouched. The daemon drives this
+// by writing the toggle straight onto the render stream — the client copies
+// render bytes to the terminal verbatim — so no new protocol frame is needed.
+const (
+	mouseGrabSeq    = "\x1b[?1002h\x1b[?1003h\x1b[?1006h"
+	mouseReleaseSeq = "\x1b[?1002l\x1b[?1003l\x1b[?1006l"
 )
 
 func cup(b *bytes.Buffer, y, x int) {
@@ -220,11 +234,23 @@ func (w *ws) renderBarLocked(b *bytes.Buffer) {
 	}
 	col = w.barSeg(b, col, " + ", seg(hitNewTab, 0, thBar), hitNewTab, 0)
 
+	// Mouse-capture toggle (ratified: top-bar control). Released: the
+	// terminal selects & copies natively; the button can't be clicked back,
+	// so F8 is the documented way to re-grab (stated in the status too).
+	if w.mouseReleased {
+		col = w.barSeg(b, col, " mouse:off ", thWarnBar, hitMouseToggle, 0)
+	} else {
+		col = w.barSeg(b, col, " mouse ", seg(hitMouseToggle, 0, thBar), hitMouseToggle, 0)
+	}
+
 	// Right side: transient status / scroll indicator, then the detach
 	// button pinned to the corner.
 	status := w.flash
 	if status == "" {
-		if s := w.scroll[w.lay.FocusedPane()]; s > 0 {
+		if w.mouseReleased {
+			// Persistent while released: the keyboard is the only way back.
+			status = "mouse released — F8 resumes tide's mouse"
+		} else if s := w.scroll[w.lay.FocusedPane()]; s > 0 {
 			status = fmt.Sprintf("SCROLL %d — wheel down or any key to resume", s)
 		}
 	}
@@ -612,4 +638,32 @@ func (w *ws) placeCursorLocked(b *bytes.Buffer) {
 // closes the conn, which triggers normal cleanup.
 func (w *ws) detachClientLocked(conn *protocol.Conn) {
 	w.sendToLocked(conn, protocol.Message{Type: protocol.TypeDetached})
+}
+
+// setMouseReleasedLocked toggles tide's mouse capture for the whole session.
+// Releasing writes the mode-reset onto every client's render stream so their
+// terminals resume native select-and-copy (the tmux-default experience);
+// re-grabbing restores tide's click UI. On release, in-flight pointer state
+// is dropped — no more mouse events arrive until F8 re-grabs. A no-op if
+// already in the requested state.
+func (w *ws) setMouseReleasedLocked(released bool) {
+	if w.mouseReleased == released {
+		return
+	}
+	w.mouseReleased = released
+	seq := mouseGrabSeq
+	if released {
+		seq = mouseReleaseSeq
+		w.sel = selectionState{}
+		w.drag = nil
+		w.pending = nil
+		w.appGrab = ""
+		w.hover = hoverState{menuItem: -1}
+	}
+	w.broadcastLocked(protocol.Message{Type: protocol.TypeRender, Data: []byte(seq)})
+	if released {
+		w.flashStatusLocked("mouse released — select & copy with your terminal; F8 resumes tide's mouse")
+	} else {
+		w.flashStatusLocked("mouse resumed — tide handles clicks again")
+	}
 }
