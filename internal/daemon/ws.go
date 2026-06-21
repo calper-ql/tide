@@ -114,11 +114,6 @@ type ws struct {
 	closing  bool
 	killed   bool // session explicitly ended: checkpoints must stop
 
-	// mouseReleased: the user toggled tide's mouse capture off (bar button),
-	// so every client's terminal owns the pointer for native select-and-copy.
-	// Session-wide and runtime-only; F8 re-grabs.
-	mouseReleased bool
-
 	dirtyPanes  map[string]bool
 	allDirty    bool
 	chromeDirty bool // chrome-only repaint (frame+bars+hover), no screen clear or content redraw
@@ -342,11 +337,6 @@ func (w *ws) attach(conn *protocol.Conn, cols, rows int,
 	w.clients[conn] = c
 	frame := w.renderLocked() // full repaint; also rebuilds the hitmap
 	c.out <- reply(frame, len(w.clients), w.lay.CountPanes())
-	if w.mouseReleased {
-		// The newcomer just enabled mouse reporting (client enterSequences);
-		// match the session's released state so its terminal selects natively.
-		c.out <- protocol.Message{Type: protocol.TypeRender, Data: []byte(mouseReleaseSeq)}
-	}
 	go clientWriter(conn, c.out)
 	// renderLocked consumed the dirty state into the newcomer's frame, but
 	// the relayout (and any dirt pending at attach time) belongs to every
