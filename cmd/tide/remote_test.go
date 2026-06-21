@@ -115,6 +115,37 @@ func TestRelayPumpsBothWays(t *testing.T) {
 	}
 }
 
+func TestBuildRemoteCmdFindsTideWithoutPATH(t *testing.T) {
+	// Default: prefer PATH, fall back to the `tide install` location, so
+	// neither a missing PATH entry nor a shell alias matters.
+	cmd := buildRemoteCmd("", nil)
+	if !contains(cmd, "$HOME/.local/bin/tide") || !contains(cmd, "command -v tide") || !contains(cmd, "--serve") {
+		t.Fatalf("default remote cmd = %q", cmd)
+	}
+	// A path arg is shell-quoted (survives spaces).
+	if c := buildRemoteCmd("", []string{"/srv/my app"}); !contains(c, "'/srv/my app'") {
+		t.Fatalf("path not shell-quoted: %q", c)
+	}
+	// --remote-bin execs that binary directly.
+	if c := buildRemoteCmd("/opt/tide", []string{"--here"}); !contains(c, "exec '/opt/tide' --serve") || !contains(c, "'--here'") {
+		t.Fatalf("remote-bin cmd = %q", c)
+	}
+}
+
+func TestParseRemoteAttach(t *testing.T) {
+	dest, bin, serve := parseRemoteAttach([]string{"user@host", "/proj"})
+	if dest != "user@host" || bin != "" || len(serve) != 1 || serve[0] != "/proj" {
+		t.Fatalf("plain: dest=%q bin=%q serve=%v", dest, bin, serve)
+	}
+	dest, bin, serve = parseRemoteAttach([]string{"--remote-bin", "/opt/tide", "h", "--here"})
+	if dest != "h" || bin != "/opt/tide" || len(serve) != 1 || serve[0] != "--here" {
+		t.Fatalf("flag: dest=%q bin=%q serve=%v", dest, bin, serve)
+	}
+	if dest, bin, _ := parseRemoteAttach([]string{"--remote-bin=/x/tide", "host"}); dest != "host" || bin != "/x/tide" {
+		t.Fatalf("eq-flag: dest=%q bin=%q", dest, bin)
+	}
+}
+
 func TestRemoteDialErrorClassifies(t *testing.T) {
 	// Protocol mismatch → actionable "update tide on host" message.
 	mm := &protocol.MismatchError{PeerBinary: "0.0.9", PeerProtocol: 2}

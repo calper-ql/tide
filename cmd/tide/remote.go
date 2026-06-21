@@ -75,6 +75,48 @@ type pipeAddr struct{}
 func (pipeAddr) Network() string { return "pipe" }
 func (pipeAddr) String() string  { return "pipe" }
 
+// parseRemoteAttach splits `tide -r` args into the ssh destination, an
+// optional --remote-bin override, and the residual args forwarded to
+// `--serve` (a path and/or --here).
+func parseRemoteAttach(args []string) (dest, remoteBin string, serveArgs []string) {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--remote-bin" && i+1 < len(args):
+			remoteBin = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--remote-bin="):
+			remoteBin = strings.TrimPrefix(a, "--remote-bin=")
+		case dest == "" && !strings.HasPrefix(a, "-"):
+			dest = a
+		default:
+			serveArgs = append(serveArgs, a)
+		}
+	}
+	return dest, remoteBin, serveArgs
+}
+
+// buildRemoteCmd is the single command ssh runs on the host. With an explicit
+// --remote-bin it execs that; otherwise it prefers a tide on PATH and falls
+// back to the `tide install` default location, so neither a missing PATH entry
+// nor a shell alias matters.
+func buildRemoteCmd(remoteBin string, serveArgs []string) string {
+	var qa string
+	for _, a := range serveArgs {
+		qa += " " + shquote(a)
+	}
+	if remoteBin != "" {
+		return "exec " + shquote(remoteBin) + " --serve" + qa
+	}
+	return `t="$HOME/.local/bin/tide"; command -v tide >/dev/null 2>&1 && t=tide; exec "$t" --serve` + qa
+}
+
+// shquote single-quotes s for a POSIX shell (the remote $SHELL runs our
+// command via -c), so paths with spaces survive.
+func shquote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
 // parseRemoteTarget splits the residual args handed to `tide --serve` into the
 // project path (a bare arg) and the --here flag, matching attach()'s shape.
 func parseRemoteTarget(args []string) (target string, here bool) {
@@ -255,11 +297,10 @@ func runPicker(conn *protocol.Conn, start string, cols, rows int) (root string, 
 // the host's serve bridge over ssh and drives the standard interactive client
 // loop locally, so the clipboard tool runs on this machine.
 func remoteAttach(args []string) error {
-	if len(args) == 0 {
-		return errors.New("usage: tide -r user@host [path]")
+	dest, remoteBin, serveArgs := parseRemoteAttach(args)
+	if dest == "" {
+		return errors.New("usage: tide -r [--remote-bin PATH] user@host [path]")
 	}
-	dest := args[0]
-	remoteArgs := args[1:] // path / --here, forwarded verbatim to --serve
 
 	stdinFd := int(os.Stdin.Fd())
 	if !term.IsTerminal(stdinFd) || !term.IsTerminal(int(os.Stdout.Fd())) {
@@ -270,8 +311,12 @@ func remoteAttach(args []string) error {
 		return err
 	}
 
-	sshArgs := append([]string{"-T", dest, "tide", "--serve"}, remoteArgs...)
-	cmd := exec.Command("ssh", sshArgs...)
+	// Invoke the remote tide WITHOUT depending on the remote PATH: prefer a
+	// tide on PATH, else the `tide install` default (~/.local/bin/tide). A
+	// shell alias is invisible to ssh, and ~/.local/bin is often off the
+	// non-interactive PATH, so this one command covers both without touching
+	// the remote's shell config.
+	cmd := exec.Command("ssh", "-T", dest, buildRemoteCmd(remoteBin, serveArgs))
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return err
