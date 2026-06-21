@@ -32,6 +32,9 @@ const usage = `tide ` + version.Binary + ` — terminal IDE
 
 usage:
   tide [path]      attach to the project's session, creating it on demand
+  tide -r user@host [path]
+                   attach a session on a remote host over ssh; the client
+                   runs here, so copy lands on this machine's clipboard
   tide --here      use the current directory as the project root verbatim
   tide ls          list live sessions
   tide kill [path] [--here]
@@ -58,6 +61,15 @@ func run(args []string) error {
 	switch args[0] {
 	case "--daemon":
 		return runDaemon(rt)
+	case "--serve":
+		// Remote bridge: invoked over ssh by `tide -r` on another machine.
+		// Runs on THIS host, bridging the host daemon to stdio; the real
+		// interactive client is the remote caller's, so copy lands there.
+		return serve(rt, args[1:])
+	case "-r":
+		// Attach a remote machine's session from here; the client runs
+		// locally so copy lands on THIS machine's clipboard.
+		return remoteAttach(args[1:])
 	case "--here":
 		return attach(rt, "", true)
 	case "ls":
@@ -195,9 +207,29 @@ func attach(rt, target string, here bool) error {
 	fmt.Printf("[tide] attached to %s (%s) — '-' in the bar or Ctrl+Shift+E detaches\n",
 		info.Root, plural(info.Clients, "client"))
 
+	reason, serr := streamSession(c, stdinFd, snap, winch,
+		"connection to the daemon closed — run 'tide ls' to check the session", nil)
+	if serr != nil {
+		return serr
+	}
+	if reason != "" {
+		fmt.Printf("[tide] %s\n", reason)
+	}
+	return nil
+}
+
+// streamSession runs the raw-terminal render/input loop against an attached
+// connection until detach, kill, or an unexpected close. snap (may be nil) is
+// the initial paint written before the loop; for a remote attach it is nil
+// because the first render frame paints. connLostMsg is the error surfaced on
+// an unexpected recv failure; extraTeardown (may be nil) runs during teardown,
+// e.g. to reap an ssh child. Shared by local attach() and remote
+// remoteAttach() — the only difference between the two is how the connection
+// is obtained, never how it is driven.
+func streamSession(c *protocol.Conn, stdinFd int, snap []byte, winch <-chan os.Signal, connLostMsg string, extraTeardown func()) (string, error) {
 	oldState, err := term.MakeRaw(stdinFd)
 	if err != nil {
-		return err
+		return "", err
 	}
 	var restoreOnce sync.Once
 	restore := func() {
@@ -209,9 +241,10 @@ func attach(rt, target string, here bool) error {
 	}
 	defer restore()
 	os.Stdout.WriteString(enterSequences)
-
-	if _, err := os.Stdout.Write(snap); err != nil {
-		return err
+	if len(snap) > 0 {
+		if _, err := os.Stdout.Write(snap); err != nil {
+			return "", err
+		}
 	}
 
 	type result struct {
@@ -248,27 +281,25 @@ func attach(rt, target string, here bool) error {
 		for {
 			m, rerr := c.Recv()
 			if rerr != nil {
-				// EOF here is ambiguous: daemon crash (state checkpointed)
-				// or a kill whose notification we missed — don't promise
-				// either.
-				done <- result{err: errors.New("connection to the daemon closed — run 'tide ls' to check the session")}
+				done <- result{err: errors.New(connLostMsg)}
 				return
 			}
 			switch m.Type {
 			case protocol.TypeRender:
 				_, _ = os.Stdout.Write(m.Data)
 			case protocol.TypeCopy:
-				// Off the render goroutine: a wedged clipboard tool must
-				// not stall frame delivery.
+				// Off the render goroutine: a wedged clipboard tool must not
+				// stall frame delivery. On a remote attach this runs on the
+				// LAPTOP, so copy lands on the laptop's clipboard.
 				go writeNativeClipboard(m.Target, m.Data)
 			case protocol.TypeDetached:
-				done <- result{reason: "detached — session keeps running; run 'tide' here to reattach"}
+				done <- result{reason: "detached — session keeps running; reattach to resume"}
 				return
 			case protocol.TypeKilled:
 				done <- result{reason: "session ended"}
 				return
 			case protocol.TypeDropped:
-				done <- result{reason: "detached by the daemon: " + m.Err + "; run 'tide' here to reattach"}
+				done <- result{reason: "detached by the daemon: " + m.Err}
 				return
 			}
 		}
@@ -282,6 +313,9 @@ func attach(rt, target string, here bool) error {
 	teardown := func() {
 		c.Close()
 		<-outputDone
+		if extraTeardown != nil {
+			extraTeardown()
+		}
 		restore()
 	}
 	for {
@@ -293,15 +327,10 @@ func attach(rt, target string, here bool) error {
 		case <-hangup:
 			// Killing the terminal is a valid detach (spec: invocation).
 			teardown()
-			fmt.Println("[tide] detached — session keeps running; run 'tide' here to reattach")
-			return nil
+			return "detached — session keeps running; reattach to resume", nil
 		case r := <-done:
 			teardown()
-			if r.err != nil {
-				return r.err
-			}
-			fmt.Printf("[tide] %s\n", r.reason)
-			return nil
+			return r.reason, r.err
 		}
 	}
 }
