@@ -126,7 +126,7 @@ func TestRemoteDialErrorClassifies(t *testing.T) {
 	c := exec.Command("sh", "-c", "exit 127")
 	_ = c.Run()
 	notFound := remoteDialError("zeus", errEOF{}, bytes.NewBufferString("bash: tide: command not found\n"), c.ProcessState).Error()
-	if !contains(notFound, "not on zeus's PATH") {
+	if !contains(notFound, "non-interactive PATH") || !contains(notFound, "tide install") {
 		t.Fatalf("not-found error = %q", notFound)
 	}
 

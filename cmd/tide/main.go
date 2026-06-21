@@ -40,6 +40,9 @@ usage:
   tide kill [path] [--here]
                    end the project's session (the only way a session ends)
   tide restart     shut the daemon down and start fresh (version upgrades)
+  tide install [dir]
+                   symlink this binary onto PATH (default ~/.local/bin) so a
+                   non-interactive ssh shell can find it for 'tide -r'
 `
 
 func main() {
@@ -70,6 +73,10 @@ func run(args []string) error {
 		// Attach a remote machine's session from here; the client runs
 		// locally so copy lands on THIS machine's clipboard.
 		return remoteAttach(args[1:])
+	case "install":
+		// Symlink this binary onto PATH so a non-interactive ssh shell (which
+		// `tide -r` uses) can find it — aliases don't work there.
+		return install(args[1:])
 	case "--here":
 		return attach(rt, "", true)
 	case "ls":

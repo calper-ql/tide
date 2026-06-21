@@ -336,7 +336,8 @@ func remoteDialError(dest string, err error, stderr *bytes.Buffer, st *os.Proces
 	msg := oneLine(strings.TrimSpace(stderr.String()))
 	exited127 := st != nil && st.ExitCode() == 127
 	if exited127 || strings.Contains(msg, "not found") || strings.Contains(msg, "No such file") {
-		return fmt.Errorf("tide is not on %s's PATH — install or build tide there, then retry"+stderrSuffix(msg), dest)
+		return fmt.Errorf("tide is not on %s's non-interactive PATH (a shell alias won't work over ssh) — "+
+			"on %s run 'tide install' to symlink it onto PATH, then retry"+stderrSuffix(msg), dest, dest)
 	}
 	if msg != "" {
 		return fmt.Errorf("could not start tide on %s: %s", dest, msg)
