@@ -146,6 +146,21 @@ func TestParseRemoteAttach(t *testing.T) {
 	}
 }
 
+func TestSetTitleSeqNamesTheRemoteAndIsSafe(t *testing.T) {
+	seq := setTitleSeq("calper@zeus")
+	if !contains(seq, "\x1b[22;0t") || !contains(seq, "tide: calper@zeus") || !contains(seq, "\a") {
+		t.Fatalf("title seq = %q", seq)
+	}
+	// An untrusted dest can't inject control bytes (BEL/ESC/DEL) that would
+	// terminate the OSC or start a new escape; printable text is left as-is.
+	if got := titleSafe("a\x07b\x1bc\x7fd"); got != "abcd" {
+		t.Fatalf("titleSafe = %q, want abcd", got)
+	}
+	if titlePop != "\x1b[23;0t" {
+		t.Fatalf("titlePop = %q", titlePop)
+	}
+}
+
 func TestRemoteDialErrorClassifies(t *testing.T) {
 	// Protocol mismatch → actionable "update tide on host" message.
 	mm := &protocol.MismatchError{PeerBinary: "0.0.9", PeerProtocol: 2}

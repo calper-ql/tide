@@ -207,8 +207,14 @@ func (w *ws) renderBarLocked(b *bytes.Buffer) {
 		return base
 	}
 	// The project segment is the session menu button (ratified): New Tab,
-	// Detach, Kill Session live behind it.
-	col := w.barSeg(b, 0, " "+runewidth.Truncate(base, 24, "…")+" ▾", seg(hitSessionMenu, 0, thAccentBar), hitSessionMenu, 0)
+	// Detach, Kill Session live behind it. It is prefixed with the host the
+	// session runs on (host:project) so you always know which machine you're
+	// on — the cue lost when attaching remotely via `tide -r`.
+	label := runewidth.Truncate(base, 24, "…")
+	if w.host != "" {
+		label = runewidth.Truncate(w.host, 24, "…") + ":" + label
+	}
+	col := w.barSeg(b, 0, " "+label+" ▾", seg(hitSessionMenu, 0, thAccentBar), hitSessionMenu, 0)
 	col = w.barSeg(b, col, "▏", thBar, hitNone, 0)
 
 	for i, tab := range w.lay.Tabs {

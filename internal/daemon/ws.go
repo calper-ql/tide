@@ -9,6 +9,7 @@ package daemon
 import (
 	"encoding/json"
 	"log"
+	"os"
 	"sync"
 	"time"
 
@@ -89,6 +90,7 @@ type hoverState struct {
 type ws struct {
 	d    *daemon
 	root string
+	host string // os.Hostname() — the machine the session's shells run on
 	logf *log.Logger
 
 	mu       sync.Mutex
@@ -135,6 +137,7 @@ func newWS(d *daemon, root string, stored session.Session, cols, rows int) (*ws,
 		renderSig:  make(chan struct{}, 1),
 		quit:       make(chan struct{}),
 	}
+	w.host, _ = os.Hostname() // shown in the bar so you know which machine you're on
 	w.setSizeLocked(cols, rows)
 
 	if len(stored.Layout) > 0 {

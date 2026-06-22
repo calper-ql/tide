@@ -117,6 +117,25 @@ func shquote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
+// titlePop restores the terminal title pushed by setTitleSeq (XTWINOPS 23;0t).
+const titlePop = "\x1b[23;0t"
+
+// setTitleSeq pushes the current terminal title (XTWINOPS 22;0t) and sets it to
+// name the remote, so the tab/window shows where you are; titleSafe strips
+// control bytes from the untrusted dest so it can't break out of the OSC.
+func setTitleSeq(dest string) string {
+	return "\x1b[22;0t\x1b]0;tide: " + titleSafe(dest) + "\a"
+}
+
+func titleSafe(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, s)
+}
+
 // parseRemoteTarget splits the residual args handed to `tide --serve` into the
 // project path (a bare arg) and the --here flag, matching attach()'s shape.
 func parseRemoteTarget(args []string) (target string, here bool) {
@@ -350,6 +369,13 @@ func remoteAttach(args []string) error {
 	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
 
 	fmt.Printf("[tide] connected to %s — copy lands on this machine; Ctrl+Shift+E detaches\n", dest)
+
+	// Name the terminal tab after the remote (the cue `ssh host` used to give),
+	// pushing the title so the prior one returns on detach. Terminals without
+	// the title stack ignore the push/pop and just keep tide's title until the
+	// shell next sets it.
+	os.Stdout.WriteString(setTitleSeq(dest))
+	defer os.Stdout.WriteString(titlePop)
 
 	winch := make(chan os.Signal, 1)
 	signal.Notify(winch, syscall.SIGWINCH)
