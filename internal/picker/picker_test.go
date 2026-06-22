@@ -152,6 +152,72 @@ func TestPickerRenderFitsAndMarksDirs(t *testing.T) {
 	}
 }
 
+func key(k input.Key) input.Event { return input.Event{Type: input.EvKey, Key: k} }
+
+func TestPickerArrowKeyNavigation(t *testing.T) {
+	root := mkTree(t) // "..", alpha/, beta/, zeta/, readme.txt
+	m := New(root, 80, 30)
+
+	// Down selects the first row, Down again moves to "alpha".
+	m.Handle(key(input.KeyDown)) // -> idx 0 (..)
+	m.Handle(key(input.KeyDown)) // -> idx 1 (alpha)
+	if m.entries[m.hover].name != "alpha" {
+		t.Fatalf("after two Downs, selected %q, want alpha", m.entries[m.hover].name)
+	}
+	// Move to "beta" and Right to descend into it.
+	m.Handle(key(input.KeyDown)) // -> beta
+	if m.entries[m.hover].name != "beta" {
+		t.Fatalf("selected %q, want beta", m.entries[m.hover].name)
+	}
+	m.Handle(key(input.KeyRight))
+	if m.dir != filepath.Join(root, "beta") {
+		t.Fatalf("Right did not descend: dir=%q", m.dir)
+	}
+	// Left goes back up AND highlights the folder we came from ("beta").
+	m.Handle(key(input.KeyLeft))
+	if m.dir != root {
+		t.Fatalf("Left did not ascend: dir=%q", m.dir)
+	}
+	if m.hover < 0 || m.entries[m.hover].name != "beta" {
+		t.Fatalf("after Left, selection = %v, want came-from beta", m.hover)
+	}
+}
+
+func TestPickerRightOnFileOrLeftAtRootIsNoop(t *testing.T) {
+	root := mkTree(t)
+	m := New(root, 80, 30)
+	// Select readme.txt (idx 4) and press Right — files aren't enterable.
+	m.selectIndex(4)
+	if m.Handle(key(input.KeyRight)) {
+		t.Error("Right on a file should do nothing")
+	}
+	if _, ok := m.Chosen(); ok || m.dir != root {
+		t.Error("Right on a file must not navigate or choose")
+	}
+	// Left at the filesystem root is a no-op.
+	r := New("/", 80, 30)
+	if r.Handle(key(input.KeyLeft)) {
+		t.Error("Left at / should do nothing")
+	}
+}
+
+func TestPickerArrowDownScrollsSelectionIntoView(t *testing.T) {
+	root := t.TempDir()
+	for i := 0; i < 50; i++ {
+		if err := os.MkdirAll(filepath.Join(root, "d"+string(rune('A'+i%26))+string(rune('0'+i/26))), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m := New(root, 80, 10) // small viewport
+	for i := 0; i < 40; i++ {
+		m.Handle(key(input.KeyDown))
+	}
+	// The selected row must be within the rendered window.
+	if m.hover < m.offset || m.hover >= m.offset+m.visibleRows() {
+		t.Fatalf("selection %d not in view [%d,%d)", m.hover, m.offset, m.offset+m.visibleRows())
+	}
+}
+
 func TestPickerInertWhenTooSmall(t *testing.T) {
 	m := New(mkTree(t), 80, 4) // rows < 6: chrome is not drawn
 	// A click where the Open button would be must NOT confirm a folder.

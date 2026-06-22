@@ -169,9 +169,13 @@ func (m *Model) Handle(ev input.Event) (dirty bool) {
 			m.pick()
 			return true
 		case input.KeyUp:
-			return m.setHover(m.hover - 1)
+			return m.moveSel(-1)
 		case input.KeyDown:
-			return m.setHover(m.hover + 1)
+			return m.moveSel(1)
+		case input.KeyRight:
+			return m.enterSelected() // descend into the highlighted folder
+		case input.KeyLeft:
+			return m.ascend() // up to the parent directory
 		}
 	case input.EvMouse:
 		switch ev.Mouse {
@@ -203,10 +207,9 @@ func (m *Model) click(x, y int) bool {
 	if idx < 0 {
 		return false
 	}
-	e := m.entries[idx]
-	switch {
+	switch e := m.entries[idx]; {
 	case e.up:
-		m.setDir(filepath.Dir(m.dir))
+		m.ascend()
 	case e.isDir:
 		m.setDir(filepath.Join(m.dir, e.name))
 	default:
@@ -238,6 +241,90 @@ func (m *Model) setHover(idx int) bool {
 	}
 	m.hover = idx
 	return true
+}
+
+// --- keyboard navigation -------------------------------------------------
+
+// moveSel moves the highlight by delta (Up/Down), scrolling it into view. The
+// first arrow press from no selection lands on the top row.
+func (m *Model) moveSel(delta int) bool {
+	if len(m.entries) == 0 {
+		return false
+	}
+	cur := m.hover
+	if cur < 0 {
+		cur, delta = 0, 0
+	}
+	return m.selectIndex(clamp(cur+delta, 0, len(m.entries)-1))
+}
+
+// selectIndex highlights idx and scrolls so it stays visible (the keyboard
+// counterpart to a mouse hover, which is always already on a visible row).
+func (m *Model) selectIndex(idx int) bool {
+	oldHover, oldOffset := m.hover, m.offset
+	m.hover = idx
+	if idx < m.offset {
+		m.offset = idx
+	} else if v := m.visibleRows(); v > 0 && idx >= m.offset+v {
+		m.offset = idx - v + 1
+	}
+	m.offset = clamp(m.offset, 0, m.maxOffset())
+	return m.hover != oldHover || m.offset != oldOffset
+}
+
+// enterSelected descends into the highlighted directory (Right arrow); ".."
+// goes up, a file does nothing.
+func (m *Model) enterSelected() bool {
+	if m.hover < 0 || m.hover >= len(m.entries) {
+		return false
+	}
+	switch e := m.entries[m.hover]; {
+	case e.up:
+		return m.ascend()
+	case e.isDir:
+		m.setDir(filepath.Join(m.dir, e.name))
+		m.selectFirst()
+		return true
+	}
+	return false
+}
+
+// ascend goes to the parent directory (Left arrow / ".."), highlighting the
+// directory we came from so you can keep your bearings.
+func (m *Model) ascend() bool {
+	parent := filepath.Dir(m.dir)
+	if parent == m.dir {
+		return false // already at the filesystem root
+	}
+	came := filepath.Base(m.dir)
+	m.setDir(parent)
+	if !m.selectNamed(came) {
+		m.selectFirst()
+	}
+	return true
+}
+
+// selectFirst highlights the first real entry (skipping the ".." row).
+func (m *Model) selectFirst() {
+	for i, e := range m.entries {
+		if !e.up {
+			m.selectIndex(i)
+			return
+		}
+	}
+	if len(m.entries) > 0 {
+		m.selectIndex(0)
+	}
+}
+
+func (m *Model) selectNamed(name string) bool {
+	for i, e := range m.entries {
+		if !e.up && e.name == name {
+			m.selectIndex(i)
+			return true
+		}
+	}
+	return false
 }
 
 // Render composes a full frame: a bar with a cancel button, the current path,
