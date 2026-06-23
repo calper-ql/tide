@@ -154,6 +154,99 @@ func TestPickerRenderFitsAndMarksDirs(t *testing.T) {
 
 func key(k input.Key) input.Event { return input.Event{Type: input.EvKey, Key: k} }
 
+func sess(root string, panes, clients int) Session {
+	return Session{Root: root, Panes: panes, Clients: clients}
+}
+
+func TestChooserListsSessionsNewOnTop(t *testing.T) {
+	m := NewChooser("/home/x", 80, 30, "zeus", []Session{sess("/a/proj", 2, 1), sess("/b/work", 1, 0)})
+	if m.mode != modeSessions {
+		t.Fatal("with sessions, should start in the chooser")
+	}
+	if m.rowCount() != 3 {
+		t.Fatalf("rowCount=%d, want 3 (New + 2 sessions)", m.rowCount())
+	}
+	if m.hover != 1 {
+		t.Fatalf("default selection = %d, want 1 (first session, reattach-first)", m.hover)
+	}
+	frame := string(m.Render())
+	for _, want := range []string{"New session", "proj", "work", "zeus", "2 panes", "1 client"} {
+		if !contains(frame, want) {
+			t.Errorf("chooser frame missing %q", want)
+		}
+	}
+}
+
+func TestChooserEnterAttachesFirstSession(t *testing.T) {
+	m := NewChooser("/home/x", 80, 30, "zeus", []Session{sess("/a/proj", 1, 0), sess("/b/work", 1, 0)})
+	m.Handle(key(input.KeyEnter)) // default selection is the first session
+	if got, ok := m.Chosen(); !ok || got != "/a/proj" {
+		t.Fatalf("Chosen = %q, %v; want /a/proj, true", got, ok)
+	}
+}
+
+func TestChooserClickSecondSessionAttaches(t *testing.T) {
+	m := NewChooser("/home/x", 80, 30, "zeus", []Session{sess("/a/proj", 1, 0), sess("/b/work", 1, 0)})
+	m.Handle(click(5, listTop+2)) // row idx 2 = second session
+	if got, ok := m.Chosen(); !ok || got != "/b/work" {
+		t.Fatalf("Chosen = %q, %v; want /b/work, true", got, ok)
+	}
+}
+
+func TestChooserNewEntersBrowserAndBackReturns(t *testing.T) {
+	root := mkTree(t)
+	m := NewChooser(root, 80, 30, "zeus", []Session{sess("/a/proj", 1, 0)})
+	m.Handle(click(5, listTop)) // row idx 0 = New
+	if m.mode != modeBrowse {
+		t.Fatal("New should enter the folder browser")
+	}
+	if !contains(string(m.Render()), "Open this folder") {
+		t.Error("browser frame should render")
+	}
+	m.Handle(click(2, 0)) // the ‹ back button at the bar's left
+	if m.mode != modeSessions {
+		t.Fatal("‹ back should return to the chooser")
+	}
+}
+
+func TestChooserSessionPickIsMarkedFromSession(t *testing.T) {
+	// A session pick must report FromSession()==true so serve passes its
+	// already-canonical root straight through — re-canonicalizing would stat
+	// the dir and wrongly reject a session whose folder was deleted/moved
+	// (the daemon reattaches such a session fine).
+	m := NewChooser("/home/x", 80, 30, "zeus", []Session{sess("/gone/proj", 1, 0)})
+	m.Handle(key(input.KeyEnter)) // default selection is the session
+	if _, ok := m.Chosen(); !ok {
+		t.Fatal("Enter should choose the session")
+	}
+	if !m.FromSession() {
+		t.Fatal("a session pick must report FromSession()==true")
+	}
+}
+
+func TestChooserBrowsePickIsNotFromSession(t *testing.T) {
+	root := mkTree(t)
+	m := NewChooser(root, 80, 30, "zeus", []Session{sess("/a/proj", 1, 0)})
+	m.Handle(click(5, listTop))  // New -> browse
+	m.Handle(click(5, m.rows-1)) // "Open this folder"
+	if _, ok := m.Chosen(); !ok {
+		t.Fatal("Open should choose the current folder")
+	}
+	if m.FromSession() {
+		t.Fatal("a browsed-folder pick must report FromSession()==false (needs canonicalization)")
+	}
+}
+
+func TestChooserEmptyGoesStraightToBrowse(t *testing.T) {
+	m := NewChooser(mkTree(t), 80, 30, "zeus", nil)
+	if m.mode != modeBrowse {
+		t.Fatal("no sessions → straight to the folder browser")
+	}
+	if m.hasBack() {
+		t.Error("no chooser behind → no back button")
+	}
+}
+
 func TestPickerArrowKeyNavigation(t *testing.T) {
 	root := mkTree(t) // "..", alpha/, beta/, zeta/, readme.txt
 	m := New(root, 80, 30)

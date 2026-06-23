@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -170,25 +171,39 @@ func serve(rt string, args []string) error {
 
 	var root string
 	if target == "" && !here {
-		// No path given → interactive folder picker, rooted at the host $HOME.
+		// No path given → interactive landing: choose a running session or
+		// browse for a new folder, rooted at the host $HOME.
 		start, herr := os.UserHomeDir()
 		if herr != nil || start == "" {
 			start = "/"
 		}
-		chosen, c2, r2, ok, perr := runPicker(conn, start, cols, rows)
+		host, _ := os.Hostname()
+		sessions, serr := remoteSessions(rt)
+		if serr != nil {
+			// An incompatible daemon is already running: fail fast with the
+			// actionable message rather than letting the user browse first.
+			return serr
+		}
+		chosen, c2, r2, fromSession, ok, perr := runPicker(conn, start, cols, rows, host, sessions)
 		if perr != nil {
 			return perr
 		}
 		if !ok {
 			return nil // user cancelled: clean exit, no session created
 		}
-		// Canonicalize (EvalSymlinks) like the explicit-path branch, so a
-		// symlinked $HOME/ancestor doesn't key a second session for one dir.
-		cr, _, rerr := resolveRoot(chosen, true)
-		if rerr != nil {
-			return rerr
+		root, cols, rows = chosen, c2, r2
+		if !fromSession {
+			// A freshly browsed folder is only Abs+Clean'd; canonicalize
+			// (EvalSymlinks) like the explicit-path branch so a symlinked
+			// ancestor doesn't key a second session. An EXISTING session's root
+			// is already canonical AND may legitimately no longer exist on disk
+			// (a session outlives its dir), so it is passed through untouched.
+			cr, _, rerr := resolveRoot(chosen, true)
+			if rerr != nil {
+				return rerr
+			}
+			root = cr
 		}
-		root, cols, rows = cr, c2, r2
 		first = protocol.Message{} // any leftover input was consumed by the picker
 	} else {
 		r, _, err := resolveRoot(target, here)
@@ -271,16 +286,42 @@ func relay(conn, d *protocol.Conn) error {
 // it paints the picker, decodes the caller's clicks/keys, and repaints on
 // change until the user opens a folder (ok=true) or cancels (ok=false). The
 // returned size reflects any resizes during the picker.
-func runPicker(conn *protocol.Conn, start string, cols, rows int) (root string, fCols, fRows int, ok bool, err error) {
-	m := picker.New(start, cols, rows)
+// remoteSessions lists the host daemon's live sessions for the chooser. No
+// daemon means an empty list (the picker falls through to the folder browser).
+// A protocol MISMATCH is returned, so serve can fail fast with the actionable
+// message instead of opening a picker that's guaranteed to fail at attach.
+func remoteSessions(rt string) ([]picker.Session, error) {
+	c, err := client.Dial(rt) // no-spawn: listing must never start a daemon
+	if err != nil {
+		var mm *protocol.MismatchError
+		if errors.As(err, &mm) {
+			return nil, err
+		}
+		return nil, nil // no daemon running yet: empty list, go to the browser
+	}
+	defer c.Close()
+	infos, err := client.Ls(c)
+	if err != nil {
+		return nil, nil
+	}
+	out := make([]picker.Session, 0, len(infos))
+	for _, s := range infos {
+		out = append(out, picker.Session{Root: s.Root, Panes: s.Panes, Clients: s.Clients})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Root < out[j].Root })
+	return out, nil
+}
+
+func runPicker(conn *protocol.Conn, start string, cols, rows int, host string, sessions []picker.Session) (root string, fCols, fRows int, fromSession, ok bool, err error) {
+	m := picker.NewChooser(start, cols, rows, host, sessions)
 	if err := conn.Send(protocol.Message{Type: protocol.TypeRender, Data: m.Render()}); err != nil {
-		return "", cols, rows, false, err
+		return "", cols, rows, false, false, err
 	}
 	dec := input.NewDecoder()
 	for {
 		msg, rerr := conn.Recv()
 		if rerr != nil {
-			return "", cols, rows, false, rerr
+			return "", cols, rows, false, false, rerr
 		}
 		dirty := false
 		switch msg.Type {
@@ -298,15 +339,15 @@ func runPicker(conn *protocol.Conn, start string, cols, rows int) (root string, 
 		}
 		if chosen, picked := m.Chosen(); picked {
 			c2, r2 := m.Size()
-			return chosen, c2, r2, true, nil
+			return chosen, c2, r2, m.FromSession(), true, nil
 		}
 		if m.Cancelled() {
 			c2, r2 := m.Size()
-			return "", c2, r2, false, nil
+			return "", c2, r2, false, false, nil
 		}
 		if dirty {
 			if err := conn.Send(protocol.Message{Type: protocol.TypeRender, Data: m.Render()}); err != nil {
-				return "", cols, rows, false, err
+				return "", cols, rows, false, false, err
 			}
 		}
 	}
@@ -388,12 +429,29 @@ func remoteAttach(args []string) error {
 		fmt.Sprintf("connection to %s closed — the session keeps running there; run 'tide -r %s' to reattach", dest, dest),
 		func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
 	if serr != nil {
+		// A host-side `tide --serve` failure (e.g. an incompatible daemon
+		// already running there) reaches us only as stderr + a dropped stream;
+		// prefer that actionable message over the generic "connection closed".
+		if hostErr := hostStderr(&stderr); hostErr != "" {
+			return fmt.Errorf("%s: %s", dest, hostErr)
+		}
 		return serr
 	}
 	if reason != "" {
 		fmt.Printf("[tide] %s\n", reason)
 	}
 	return nil
+}
+
+// hostStderr extracts the host tide's own error from captured ssh stderr (its
+// lines are prefixed "tide:"), ignoring ssh's own chatter (host-key warnings).
+func hostStderr(stderr *bytes.Buffer) string {
+	for _, line := range strings.Split(stderr.String(), "\n") {
+		if msg, ok := strings.CutPrefix(strings.TrimSpace(line), "tide:"); ok {
+			return strings.TrimSpace(msg)
+		}
+	}
+	return ""
 }
 
 // remoteDialError turns a failed remote handshake into an actionable message:

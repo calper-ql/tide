@@ -1,14 +1,19 @@
-// Package picker is the interactive remote folder chooser for `tide -r host`
-// with no path. It runs inside `tide --serve` on the host (where it can read
-// the host filesystem) and renders into the daemon's terminal-stream idiom, so
-// the dumb-glass client on the laptop just blits the frames and ships clicks
-// back. It is mouse-first (tide's ethos): click a folder to enter, ".." to go
-// up, the wheel to scroll, and the bottom button to choose where you are.
+// Package picker is the interactive landing for `tide -r host` with no path.
+// It runs inside `tide --serve` on the host (where it can read the host
+// filesystem and reach the host daemon) and renders into the daemon's
+// terminal-stream idiom, so the dumb-glass client on the laptop just blits the
+// frames and ships clicks/keys back. It is mouse-first AND keyboard-friendly.
 //
-// The directory-listing behaviour (dirs first, case-insensitive, .git hidden)
-// mirrors teddy's file browser (cmd/teddy/browser.go); the rendering and
-// navigation are tide-native because teddy's renderer is bound to a real tty
-// and its tree is expand-in-place, not descend/ascend.
+// Two modes:
+//   - sessions: a chooser listing running sessions plus "+ New session…".
+//     Pick a session to attach to it; pick New to enter the folder browser.
+//   - browse:   a folder browser (click/→ to enter, ".."/← to go up, ✓ to
+//     open the current folder as the project root). A "‹ back" returns to the
+//     chooser when one is behind us.
+//
+// Directory listing (dirs first, case-insensitive, .git hidden) mirrors
+// teddy's browser; rendering/navigation are tide-native because teddy's
+// renderer is tty-bound and its tree is expand-in-place, not descend/ascend.
 package picker
 
 import (
@@ -24,18 +29,34 @@ import (
 )
 
 const (
-	listTop   = 2 // rows 0 (bar) and 1 (breadcrumb) sit above the list
+	listTop   = 2 // rows 0 (bar) and 1 (breadcrumb/subtitle) sit above the list
 	wheelStep = 3
 
 	styReset = "\x1b[0m"
 	styBar   = "\x1b[0;7m"   // reverse: bar + buttons (theme-adaptive, no truecolor)
-	styDir   = "\x1b[0;1m"   // bold: directories
+	styDir   = "\x1b[0;1m"   // bold: directories, the New row
 	styFile  = "\x1b[0;2m"   // dim: files
-	styDim   = "\x1b[0;2m"   // dim: breadcrumb
-	styHover = "\x1b[0;7;1m" // reverse bold: row under the pointer
+	styDim   = "\x1b[0;2m"   // dim: breadcrumb/subtitle
+	styHover = "\x1b[0;7;1m" // reverse bold: row under the pointer / selection
+
+	cancelLabel = " ✕ cancel "
+	backLabel   = " ‹ back  "
 )
 
-const cancelLabel = " ✕ cancel "
+// renderMode selects the picker's screen. modeSessions is the zero value.
+type renderMode int
+
+const (
+	modeSessions renderMode = iota // the session chooser
+	modeBrowse                     // the folder browser
+)
+
+// Session is one running session offered in the chooser.
+type Session struct {
+	Root    string
+	Panes   int
+	Clients int
+}
 
 type entry struct {
 	name  string
@@ -43,24 +64,44 @@ type entry struct {
 	up    bool // the ".." row
 }
 
-// Model is the picker state: the current directory, its entries, scroll
-// offset, and the hovered row. All mutation happens through Handle.
+// Model is the picker state. All mutation happens through Handle.
 type Model struct {
-	dir     string
-	entries []entry
-	offset  int
+	mode     renderMode
+	startDir string    // where the browser opens (host $HOME)
+	host     string    // shown in the chooser title
+	sessions []Session // chooser rows (besides New)
+
+	dir     string  // browse: current directory
+	entries []entry // browse: entries of dir
+	offset  int     // scroll offset (both modes)
+	hover   int     // highlighted row; -1 = none
 	cols    int
 	rows    int
-	hover   int // hovered entry index; -1 = none
-	chosen  string
-	picked  bool
-	cancel  bool
+
+	chosen        string
+	picked        bool
+	chosenSession bool // chosen came from a running session, not a browsed folder
+	cancel        bool
 }
 
-// New opens the picker rooted at dir (e.g. the host's $HOME).
-func New(dir string, cols, rows int) *Model {
-	m := &Model{cols: cols, rows: rows, hover: -1}
-	m.setDir(dir)
+// New opens a folder browser directly (no session chooser). Used where there
+// is nothing to choose between.
+func New(start string, cols, rows int) *Model {
+	return NewChooser(start, cols, rows, "", nil)
+}
+
+// NewChooser opens the session chooser when sessions exist, else falls
+// straight through to the folder browser (a one-item chooser is just a speed
+// bump).
+func NewChooser(start string, cols, rows int, host string, sessions []Session) *Model {
+	m := &Model{cols: cols, rows: rows, hover: -1, startDir: start, host: host, sessions: sessions}
+	if len(sessions) > 0 {
+		m.mode = modeSessions
+		m.hover = 1 // default to the first session (reattach is the common case)
+	} else {
+		m.mode = modeBrowse
+		m.setDir(start)
+	}
 	return m
 }
 
@@ -109,23 +150,35 @@ func (m *Model) Resize(cols, rows int) {
 	m.offset = clamp(m.offset, 0, m.maxOffset())
 }
 
-// Size reports the current viewport (the dimensions the daemon should attach
-// at once a folder is chosen).
+// Size reports the current viewport (the dimensions the daemon attaches at
+// once a folder/session is chosen).
 func (m *Model) Size() (cols, rows int) { return m.cols, m.rows }
 
-// Chosen reports the picked folder once the user confirms.
+// Chosen reports the picked root (a session's, or a browsed folder's).
 func (m *Model) Chosen() (string, bool) { return m.chosen, m.picked }
+
+// FromSession reports whether the pick was an existing session (whose root is
+// already canonical and may even no longer exist on disk) rather than a
+// freshly browsed folder. The caller skips re-canonicalization for sessions.
+func (m *Model) FromSession() bool { return m.chosenSession }
 
 // Cancelled reports that the user aborted without choosing.
 func (m *Model) Cancelled() bool { return m.cancel }
 
-// tooSmall reports a viewport too small to draw the chrome. When true, Render
-// shows only a notice and Handle ignores input, so the screen and the hit map
-// never disagree (a click can't land on a row that isn't drawn).
 func (m *Model) tooSmall() bool { return m.cols < 24 || m.rows < 6 }
 
+func (m *Model) hasBack() bool { return len(m.sessions) > 0 }
+
+// rowCount is the number of selectable list rows in the current mode.
+func (m *Model) rowCount() int {
+	if m.mode == modeSessions {
+		return len(m.sessions) + 1 // +1 for the New row
+	}
+	return len(m.entries)
+}
+
 func (m *Model) visibleRows() int {
-	v := m.rows - listTop - 1 // last row is the Open button
+	v := m.rows - listTop - 1 // last row is the Open button / hint
 	if v < 0 {
 		return 0
 	}
@@ -133,21 +186,21 @@ func (m *Model) visibleRows() int {
 }
 
 func (m *Model) maxOffset() int {
-	if over := len(m.entries) - m.visibleRows(); over > 0 {
+	if over := m.rowCount() - m.visibleRows(); over > 0 {
 		return over
 	}
 	return 0
 }
 
-// entryAt maps a screen cell to an entry index, or -1 if the cell is not on a
-// list row. The exact same offset arithmetic backs Render, so a click always
-// lands on the row the user sees (the off-by-one hazard lives here).
+// entryAt maps a screen cell to a list row index, or -1 if the cell is not on
+// a list row. The same offset arithmetic backs both renders, so a click always
+// lands on the row the user sees.
 func (m *Model) entryAt(x, y int) int {
 	if y < listTop || y >= listTop+m.visibleRows() {
 		return -1
 	}
 	idx := m.offset + (y - listTop)
-	if idx < 0 || idx >= len(m.entries) {
+	if idx < 0 || idx >= m.rowCount() {
 		return -1
 	}
 	return idx
@@ -160,23 +213,11 @@ func (m *Model) cancelStart() int { return m.cols - utf8.RuneCountInString(cance
 // motion stream does not flood a remote link.
 func (m *Model) Handle(ev input.Event) (dirty bool) {
 	if m.tooSmall() {
-		return false // chrome isn't drawn; ignore clicks/keys until resized
+		return false // chrome isn't drawn; ignore input until resized
 	}
 	switch ev.Type {
 	case input.EvKey:
-		switch ev.Key {
-		case input.KeyEnter:
-			m.pick()
-			return true
-		case input.KeyUp:
-			return m.moveSel(-1)
-		case input.KeyDown:
-			return m.moveSel(1)
-		case input.KeyRight:
-			return m.enterSelected() // descend into the highlighted folder
-		case input.KeyLeft:
-			return m.ascend() // up to the parent directory
-		}
+		return m.handleKey(ev.Key)
 	case input.EvMouse:
 		switch ev.Mouse {
 		case input.MouseWheelUp:
@@ -192,19 +233,74 @@ func (m *Model) Handle(ev input.Event) (dirty bool) {
 	return false
 }
 
+func (m *Model) handleKey(k input.Key) bool {
+	if m.mode == modeSessions {
+		switch k {
+		case input.KeyUp:
+			return m.moveSel(-1)
+		case input.KeyDown:
+			return m.moveSel(1)
+		case input.KeyEnter, input.KeyRight:
+			if m.hover >= 0 {
+				return m.activate(m.hover)
+			}
+		}
+		return false
+	}
+	switch k {
+	case input.KeyEnter:
+		m.pick() // open the current folder as the project root
+		return true
+	case input.KeyUp:
+		return m.moveSel(-1)
+	case input.KeyDown:
+		return m.moveSel(1)
+	case input.KeyRight:
+		return m.enterSelected()
+	case input.KeyLeft:
+		return m.ascend()
+	}
+	return false
+}
+
 func (m *Model) click(x, y int) bool {
-	switch {
-	case y == 0:
+	if y == 0 { // bar
+		if m.mode == modeBrowse && m.hasBack() && x < utf8.RuneCountInString(backLabel) {
+			m.setMode(modeSessions)
+			return true
+		}
 		if x >= m.cancelStart() {
 			m.cancel = true
 		}
 		return true
-	case y == m.rows-1:
+	}
+	if m.mode == modeBrowse && y == m.rows-1 { // Open button (browse only)
 		m.pick()
 		return true
 	}
 	idx := m.entryAt(x, y)
 	if idx < 0 {
+		return false
+	}
+	return m.activate(idx)
+}
+
+// activate acts on list row idx for the current mode.
+func (m *Model) activate(idx int) bool {
+	if m.mode == modeSessions {
+		if idx == 0 {
+			m.enterBrowse() // the New row
+			return true
+		}
+		if s := idx - 1; s >= 0 && s < len(m.sessions) {
+			m.chosen = m.sessions[s].Root
+			m.picked = true
+			m.chosenSession = true
+			return true
+		}
+		return false
+	}
+	if idx < 0 || idx >= len(m.entries) {
 		return false
 	}
 	switch e := m.entries[idx]; {
@@ -216,6 +312,25 @@ func (m *Model) click(x, y int) bool {
 		return false // files are not project roots
 	}
 	return true
+}
+
+func (m *Model) setMode(mode renderMode) {
+	m.mode = mode
+	m.offset = 0
+	if mode == modeSessions {
+		m.hover = 1
+		if len(m.sessions) == 0 {
+			m.hover = 0
+		}
+	} else {
+		m.hover = -1
+	}
+}
+
+func (m *Model) enterBrowse() {
+	m.mode = modeBrowse
+	m.setDir(m.startDir)
+	m.selectFirst()
 }
 
 func (m *Model) pick() {
@@ -233,7 +348,7 @@ func (m *Model) scroll(delta int) bool {
 }
 
 func (m *Model) setHover(idx int) bool {
-	if idx < 0 || idx >= len(m.entries) {
+	if idx < 0 || idx >= m.rowCount() {
 		idx = -1
 	}
 	if idx == m.hover {
@@ -248,18 +363,17 @@ func (m *Model) setHover(idx int) bool {
 // moveSel moves the highlight by delta (Up/Down), scrolling it into view. The
 // first arrow press from no selection lands on the top row.
 func (m *Model) moveSel(delta int) bool {
-	if len(m.entries) == 0 {
+	if m.rowCount() == 0 {
 		return false
 	}
 	cur := m.hover
 	if cur < 0 {
 		cur, delta = 0, 0
 	}
-	return m.selectIndex(clamp(cur+delta, 0, len(m.entries)-1))
+	return m.selectIndex(clamp(cur+delta, 0, m.rowCount()-1))
 }
 
-// selectIndex highlights idx and scrolls so it stays visible (the keyboard
-// counterpart to a mouse hover, which is always already on a visible row).
+// selectIndex highlights idx and scrolls so it stays visible.
 func (m *Model) selectIndex(idx int) bool {
 	oldHover, oldOffset := m.hover, m.offset
 	m.hover = idx
@@ -273,7 +387,7 @@ func (m *Model) selectIndex(idx int) bool {
 }
 
 // enterSelected descends into the highlighted directory (Right arrow); ".."
-// goes up, a file does nothing.
+// goes up, a file does nothing. Browse mode only.
 func (m *Model) enterSelected() bool {
 	if m.hover < 0 || m.hover >= len(m.entries) {
 		return false
@@ -290,11 +404,16 @@ func (m *Model) enterSelected() bool {
 }
 
 // ascend goes to the parent directory (Left arrow / ".."), highlighting the
-// directory we came from so you can keep your bearings.
+// directory we came from. At the filesystem root, it returns to the session
+// chooser if one is behind us.
 func (m *Model) ascend() bool {
 	parent := filepath.Dir(m.dir)
 	if parent == m.dir {
-		return false // already at the filesystem root
+		if m.hasBack() {
+			m.setMode(modeSessions)
+			return true
+		}
+		return false // already at the filesystem root, no chooser behind us
 	}
 	came := filepath.Base(m.dir)
 	m.setDir(parent)
@@ -304,7 +423,6 @@ func (m *Model) ascend() bool {
 	return true
 }
 
-// selectFirst highlights the first real entry (skipping the ".." row).
 func (m *Model) selectFirst() {
 	for i, e := range m.entries {
 		if !e.up {
@@ -327,11 +445,16 @@ func (m *Model) selectNamed(name string) bool {
 	return false
 }
 
-// Render composes a full frame: a bar with a cancel button, the current path,
-// the windowed entry list, and the "Open this folder" button. A full repaint
-// each frame keeps render and hit-testing trivially in sync; repaints only
-// happen on a real state change (see Handle).
+// --- rendering -----------------------------------------------------------
+
 func (m *Model) Render() []byte {
+	if m.mode == modeSessions {
+		return m.renderSessions()
+	}
+	return m.renderBrowse()
+}
+
+func (m *Model) renderSessions() []byte {
 	var b bytes.Buffer
 	b.WriteString("\x1b[?25l" + styReset + "\x1b[2J")
 	if m.tooSmall() {
@@ -340,19 +463,52 @@ func (m *Model) Render() []byte {
 		return b.Bytes()
 	}
 
-	// Row 0: bar with the cancel button pinned right.
-	cup(&b, 0, 0)
-	bar := []rune(padRight(" tide — choose a folder (click to enter · ✓ to open)", m.cols))
-	for i, r := range []rune(cancelLabel) {
-		bar[m.cancelStart()+i] = r
+	title := " tide — pick a session"
+	if m.host != "" {
+		title = " tide — sessions on " + m.host
 	}
-	b.WriteString(styBar + string(bar) + styReset)
+	m.bar(&b, title, false)
 
-	// Row 1: current path.
+	cup(&b, 1, 0)
+	b.WriteString(styDim + truncate(" attach to one below, or start a new session", m.cols) + styReset)
+
+	for i := 0; i < m.visibleRows(); i++ {
+		idx := m.offset + i
+		if idx >= m.rowCount() {
+			break
+		}
+		cup(&b, listTop+i, 0)
+		label, st := " + New session…", styDir
+		if idx > 0 {
+			label, st = sessionLabel(m.sessions[idx-1]), styReset
+		}
+		if idx == m.hover {
+			b.WriteString(styHover + padRight(label, m.cols) + styReset)
+		} else {
+			b.WriteString(st + truncate(label, m.cols) + styReset)
+		}
+	}
+	return b.Bytes()
+}
+
+func (m *Model) renderBrowse() []byte {
+	var b bytes.Buffer
+	b.WriteString("\x1b[?25l" + styReset + "\x1b[2J")
+	if m.tooSmall() {
+		cup(&b, 0, 0)
+		b.WriteString("window too small")
+		return b.Bytes()
+	}
+
+	title := " tide — choose a folder (click to enter · ✓ to open)"
+	if m.hasBack() {
+		title = backLabel + "tide — choose a folder"
+	}
+	m.bar(&b, title, m.hasBack())
+
 	cup(&b, 1, 0)
 	b.WriteString(styDim + truncate(" "+m.dir, m.cols) + styReset)
 
-	// Entry list.
 	for i := 0; i < m.visibleRows(); i++ {
 		idx := m.offset + i
 		if idx >= len(m.entries) {
@@ -361,10 +517,10 @@ func (m *Model) Render() []byte {
 		cup(&b, listTop+i, 0)
 		e := m.entries[idx]
 		label := " " + e.name
-		if e.isDir && !e.up {
-			label += "/"
-		} else if e.up {
+		if e.up {
 			label = " ../"
+		} else if e.isDir {
+			label += "/"
 		}
 		switch {
 		case idx == m.hover:
@@ -376,10 +532,35 @@ func (m *Model) Render() []byte {
 		}
 	}
 
-	// Last row: the Open button.
 	cup(&b, m.rows-1, 0)
 	b.WriteString(styBar + padRight(truncate(" ✓ Open this folder: "+m.dir, m.cols), m.cols) + styReset)
 	return b.Bytes()
+}
+
+// bar draws row 0: a title with the cancel button pinned right. The back
+// button, when present, is baked into the title string at the left.
+func (m *Model) bar(b *bytes.Buffer, title string, _ bool) {
+	cup(b, 0, 0)
+	row := []rune(padRight(title, m.cols))
+	for i, r := range []rune(cancelLabel) {
+		row[m.cancelStart()+i] = r
+	}
+	b.WriteString(styBar + string(row) + styReset)
+}
+
+func sessionLabel(s Session) string {
+	meta := fmt.Sprintf("%d pane%s", s.Panes, plural(s.Panes))
+	if s.Clients > 0 {
+		meta += fmt.Sprintf(" · %d client%s", s.Clients, plural(s.Clients))
+	}
+	return fmt.Sprintf(" %s  —  %s  ·  %s", filepath.Base(s.Root), s.Root, meta)
+}
+
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
 
 func cup(b *bytes.Buffer, y, x int) { fmt.Fprintf(b, "\x1b[%d;%dH", y+1, x+1) }
@@ -403,8 +584,7 @@ func truncate(s string, w int) string {
 	if utf8.RuneCountInString(s) <= w {
 		return s
 	}
-	r := []rune(s)
-	return string(r[:w])
+	return string([]rune(s)[:w])
 }
 
 func padRight(s string, w int) string {
