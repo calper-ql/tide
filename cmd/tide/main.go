@@ -37,6 +37,7 @@ usage:
                    runs here, so copy lands on this machine's clipboard
   tide --here      use the current directory as the project root verbatim
   tide ls          list live sessions
+  tide manage      interactively kill sessions (also: tide -r host manage)
   tide kill [path] [--here]
                    end the project's session (the only way a session ends)
   tide restart     shut the daemon down and start fresh (version upgrades)
@@ -77,6 +78,12 @@ func run(args []string) error {
 		// Symlink this binary onto PATH so a non-interactive ssh shell (which
 		// `tide -r` uses) can find it — aliases don't work there.
 		return install(args[1:])
+	case "manage":
+		// Interactive session manager (list + kill with confirmation).
+		return manageCmd(rt)
+	case "--serve-manage":
+		// Host side of `tide -r host manage`, invoked over ssh.
+		return serveManage(rt)
 	case "--here":
 		return attach(rt, "", true)
 	case "ls":
@@ -360,10 +367,19 @@ func ls(rt string) error {
 		fmt.Println("[tide] no live sessions")
 		return nil
 	}
-	for _, s := range sessions {
-		fmt.Printf("%s\t%s\t%s\tsince %s\n",
-			s.Root, plural(s.Panes, "pane"), plural(s.Clients, "client"),
-			s.CreatedAt.Local().Format(time.DateTime))
+	// Columns: panes, clients, then the path last — pane/client columns padded
+	// to the widest so they line up regardless of the counts.
+	panes := make([]string, len(sessions))
+	clients := make([]string, len(sessions))
+	pw, cw := 0, 0
+	for i, s := range sessions {
+		panes[i] = plural(s.Panes, "pane")
+		clients[i] = plural(s.Clients, "client")
+		pw = max(pw, len(panes[i]))
+		cw = max(cw, len(clients[i]))
+	}
+	for i, s := range sessions {
+		fmt.Printf("%-*s  %-*s  %s\n", pw, panes[i], cw, clients[i], s.Root)
 	}
 	return nil
 }

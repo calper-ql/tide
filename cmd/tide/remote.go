@@ -101,15 +101,15 @@ func parseRemoteAttach(args []string) (dest, remoteBin string, serveArgs []strin
 // --remote-bin it execs that; otherwise it prefers a tide on PATH and falls
 // back to the `tide install` default location, so neither a missing PATH entry
 // nor a shell alias matters.
-func buildRemoteCmd(remoteBin string, serveArgs []string) string {
+func buildRemoteCmd(remoteBin, serveCmd string, serveArgs []string) string {
 	var qa string
 	for _, a := range serveArgs {
 		qa += " " + shquote(a)
 	}
 	if remoteBin != "" {
-		return "exec " + shquote(remoteBin) + " --serve" + qa
+		return "exec " + shquote(remoteBin) + " " + serveCmd + qa
 	}
-	return `t="$HOME/.local/bin/tide"; command -v tide >/dev/null 2>&1 && t=tide; exec "$t" --serve` + qa
+	return `t="$HOME/.local/bin/tide"; command -v tide >/dev/null 2>&1 && t=tide; exec "$t" ` + serveCmd + qa
 }
 
 // shquote single-quotes s for a POSIX shell (the remote $SHELL runs our
@@ -376,7 +376,13 @@ func remoteAttach(args []string) error {
 	// shell alias is invisible to ssh, and ~/.local/bin is often off the
 	// non-interactive PATH, so this one command covers both without touching
 	// the remote's shell config.
-	cmd := exec.Command("ssh", "-T", dest, buildRemoteCmd(remoteBin, serveArgs))
+	// `tide -r host manage` runs the session manager over the bridge instead
+	// of attaching.
+	serveCmd := "--serve"
+	if len(serveArgs) == 1 && serveArgs[0] == "manage" {
+		serveCmd, serveArgs = "--serve-manage", nil
+	}
+	cmd := exec.Command("ssh", "-T", dest, buildRemoteCmd(remoteBin, serveCmd, serveArgs))
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return err

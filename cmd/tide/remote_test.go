@@ -118,17 +118,17 @@ func TestRelayPumpsBothWays(t *testing.T) {
 func TestBuildRemoteCmdFindsTideWithoutPATH(t *testing.T) {
 	// Default: prefer PATH, fall back to the `tide install` location, so
 	// neither a missing PATH entry nor a shell alias matters.
-	cmd := buildRemoteCmd("", nil)
+	cmd := buildRemoteCmd("", "--serve", nil)
 	if !contains(cmd, "$HOME/.local/bin/tide") || !contains(cmd, "command -v tide") || !contains(cmd, "--serve") {
 		t.Fatalf("default remote cmd = %q", cmd)
 	}
 	// A path arg is shell-quoted (survives spaces).
-	if c := buildRemoteCmd("", []string{"/srv/my app"}); !contains(c, "'/srv/my app'") {
+	if c := buildRemoteCmd("", "--serve", []string{"/srv/my app"}); !contains(c, "'/srv/my app'") {
 		t.Fatalf("path not shell-quoted: %q", c)
 	}
-	// --remote-bin execs that binary directly.
-	if c := buildRemoteCmd("/opt/tide", []string{"--here"}); !contains(c, "exec '/opt/tide' --serve") || !contains(c, "'--here'") {
-		t.Fatalf("remote-bin cmd = %q", c)
+	// --remote-bin execs that binary directly; the subcommand is parameterized.
+	if c := buildRemoteCmd("/opt/tide", "--serve-manage", nil); !contains(c, "exec '/opt/tide' --serve-manage") {
+		t.Fatalf("remote-bin manage cmd = %q", c)
 	}
 }
 
