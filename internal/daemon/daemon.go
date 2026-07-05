@@ -14,7 +14,9 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -32,9 +34,16 @@ type Options struct {
 }
 
 type daemon struct {
-	logf     *log.Logger
-	registry *session.Registry
-	socket   string
+	logf      *log.Logger
+	registry  *session.Registry
+	socket    string
+	prefsPath string
+
+	// The active theme is read by every workspace's render under its own
+	// lock; an atomic pointer keeps theme switches free of any daemon/ws
+	// lock nesting. nil means the default (tests build bare daemons).
+	theme   atomic.Pointer[theme]
+	prefsMu sync.Mutex // serializes prefs.json writers (rapid picker clicks)
 
 	mu       sync.Mutex
 	sessions map[string]*ws // root → live workspace
@@ -42,6 +51,45 @@ type daemon struct {
 
 	shutdown chan struct{}
 	once     sync.Once
+}
+
+// themeNow returns the active theme, defaulting when none was ever set.
+func (d *daemon) themeNow() *theme {
+	if t := d.theme.Load(); t != nil {
+		return t
+	}
+	return &themes[0]
+}
+
+// persistTheme checkpoints the active theme choice and repaints every
+// session so all attached clients see it at once. It runs on its own
+// goroutine (the picker's run closure holds a workspace lock): workspaces
+// are collected under the daemon lock, then poked under their own — never
+// nested, same discipline as killFromUI.
+func (d *daemon) persistTheme() {
+	if d.prefsPath != "" {
+		// Read the theme UNDER the prefs mutex: rapid picker clicks spawn
+		// unordered goroutines, and re-reading inside the critical section
+		// guarantees the last write holds the newest choice (a stale
+		// goroutine re-persists the same newest value, never an older one).
+		d.prefsMu.Lock()
+		t := d.themeNow()
+		if err := session.SavePrefs(d.prefsPath, session.Prefs{Theme: strings.ToLower(t.name)}); err != nil {
+			d.logf.Printf("theme prefs checkpoint failed: %v", err)
+		}
+		d.prefsMu.Unlock()
+	}
+	d.mu.Lock()
+	list := make([]*ws, 0, len(d.sessions))
+	for _, w := range d.sessions {
+		list = append(list, w)
+	}
+	d.mu.Unlock()
+	for _, w := range list {
+		w.mu.Lock()
+		w.markAllDirtyLocked()
+		w.mu.Unlock()
+	}
 }
 
 // lockExclusive takes a non-blocking exclusive flock on path, then verifies
@@ -141,13 +189,21 @@ func Run(opts Options) error {
 	}
 
 	d := &daemon{
-		logf:     logf,
-		registry: registry,
-		socket:   sock,
-		sessions: map[string]*ws{},
-		shutdown: make(chan struct{}),
+		logf:      logf,
+		registry:  registry,
+		socket:    sock,
+		prefsPath: session.PrefsPath(opts.StatePath),
+		sessions:  map[string]*ws{},
+		shutdown:  make(chan struct{}),
 	}
-	logf.Printf("daemon up: socket=%s sessions=%d", sock, registry.Len())
+	if p := session.LoadPrefs(d.prefsPath); p.Theme != "" {
+		t, known := themeByName(p.Theme)
+		if !known {
+			logf.Printf("WARNING: prefs name an unknown theme %q; using %s", p.Theme, t.name)
+		}
+		d.theme.Store(&t)
+	}
+	logf.Printf("daemon up: socket=%s sessions=%d theme=%s", sock, registry.Len(), d.themeNow().name)
 
 	// SIGTERM is the version-independent shutdown path: `tide restart`
 	// uses it when the running daemon speaks a different protocol.

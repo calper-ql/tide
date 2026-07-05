@@ -106,7 +106,11 @@ func (w *ws) routeKeyLocked(conn *protocol.Conn, ev input.Event) {
 		case input.KeyEscape:
 			w.closeOverlayLocked()
 		case input.KeyEnter:
-			w.runFirstEnabledLocked(conn)
+			w.runSelectedLocked(conn)
+		case input.KeyUp:
+			w.moveSelLocked(-1)
+		case input.KeyDown:
+			w.moveSelLocked(1)
 		}
 		return
 	}
@@ -218,22 +222,30 @@ func (w *ws) routeMouseLocked(conn *protocol.Conn, ev input.Event) {
 
 	// A frame press waiting to become either a drag or a click (ratified
 	// gesture model: motion resizes, release-in-place opens the layout
-	// menu for the owning pane).
+	// menu for the pressed element).
 	if w.pending != nil {
 		switch ev.Mouse {
 		case input.MouseMotion:
 			if w.pending.hasV || w.pending.hasH {
+				// Draggable boundaries convert on FIRST motion: a deliberate
+				// 1-cell resize must stay instant (the tmux benchmark).
 				w.drag = &dragState{v: w.pending.v, h: w.pending.h, hasV: w.pending.hasV, hasH: w.pending.hasH,
 					lastX: w.pending.x, lastY: w.pending.y}
 				w.pending = nil
 				w.routeMouseLocked(conn, ev) // re-dispatch into the drag
 				return
 			}
-			w.pending.moved = true // nothing to drag here (outer edge, topmost bar)
+			// Nothing to drag here (outer ring, topmost bar): a 3×3 slop
+			// keeps a jittery click a click instead of eating its menu.
+			if absInt(ev.X-w.pending.x) > 1 || absInt(ev.Y-w.pending.y) > 1 {
+				w.pending.moved = true
+			}
 		case input.MouseRelease:
 			p := w.pending
 			w.pending = nil
 			if !p.moved && p.menu != nil {
+				// Anchor at the RELEASE cell: that is where the pointer sits
+				// now, so that is where the second click of click-click lands.
 				p.menu(w, ev.X, ev.Y)
 			}
 		}
@@ -309,26 +321,34 @@ func (w *ws) routeMouseLocked(conn *protocol.Conn, ev input.Event) {
 		case hitDetach:
 			w.detachClientLocked(conn)
 		case hitSessionMenu:
-			w.openSessionMenuLocked(ev.X, ev.Y)
+			w.openSessionMenuLocked(hit.rect.X, 1) // dropdown below the bar
+		case hitPaneSplit:
+			w.focusPaneLocked(hit.pane)
+			w.openSplitMenuLocked(hit.pane, hit.rect.X, hit.rect.Y+1)
 		case hitPaneMenu:
 			w.focusPaneLocked(hit.pane)
-			w.openPaneMenuLocked(hit.pane, ev.X, ev.Y)
+			w.openPaneMenuLocked(hit.pane, hit.rect.X, hit.rect.Y+1)
 		case hitPaneBar:
-			w.focusPaneLocked(hit.pane)
+			// Bars are focus and drag handles, never menus — i3's rule:
+			// clicking a title bar focuses, period. Splits live on the [+]
+			// button and the window's edges. Exceptions: the junction where
+			// a divider bar meets a vertical border keeps its full-span menu
+			// (junction semantics — junctions belong to containers, so no
+			// focus), and a dead pane's bar honors its own "click to
+			// restart" label.
 			p := &pendingPress{x: ev.X, y: ev.Y, h: hit.border, hasH: hit.hasBorder}
 			if vb, ok := w.cornerVBorderLocked(ev.X, ev.Y); ok {
 				p.v, p.hasV = vb, true
 			}
 			if p.hasH && p.hasV {
-				// A divider bar meeting a vertical border is a corner: drag
-				// resizes both axes, a click offers the full-span splits of
-				// the two containers meeting here.
 				vb, hb := p.v, p.h
 				p.menu = func(w *ws, x, y int) { w.openSpanMenuLocked(vb.Node, hb.Node, x, y) }
 			} else {
-				// The bar is this window's top edge: split it upward.
-				pane := hit.pane
-				p.menu = func(w *ws, x, y int) { w.openEdgeMenuLocked(pane, layout.SplitUp, x, y) }
+				w.focusPaneLocked(hit.pane)
+				if pp := w.panes[hit.pane]; pp != nil && pp.isDead() {
+					pane := hit.pane
+					p.menu = func(w *ws, _, _ int) { w.restartPaneLocked(pane) }
+				}
 			}
 			w.pending = p
 		case hitBorder:
@@ -344,20 +364,31 @@ func (w *ws) routeMouseLocked(conn *protocol.Conn, ev input.Event) {
 				// container it divides.
 				p.menu = func(w *ws, x, y int) { w.openSpanMenuLocked(vb.Node, nil, x, y) }
 			} else if left := w.paneLeftOfBorderLocked(vb, ev.Y); left != "" {
-				// Mid-border: the right edge of the pane on its left.
-				p.menu = func(w *ws, x, y int) { w.openEdgeMenuLocked(left, layout.SplitRight, x, y) }
+				// Mid-border: the right edge of the pane on its left. Focus
+				// follows the CLICK (i3), so the accent perimeter shows the
+				// window the menu will split — but only on click resolution:
+				// a resize drag must never steal focus or clear a selection.
+				p.menu = func(w *ws, x, y int) {
+					w.focusPaneLocked(left)
+					w.openEdgeMenuLocked(left, layout.SplitRight, x, y)
+				}
 			}
 			w.pending = p
 		case hitFrameEdge:
 			// A ring junction (┴ where a border meets the bottom, ├/┤ where a
 			// divider meets a side) offers full-span splits; the flat ring is
-			// the abutting window's own left/right/bottom edge.
+			// the abutting window's own left/right/bottom edge, and a CLICK
+			// on it focuses that window like any of its edges (never a press
+			// that turns out to be travel).
 			if vNode, hNode, ok := w.ringCornerLocked(ev.X, ev.Y); ok {
 				w.pending = &pendingPress{x: ev.X, y: ev.Y,
 					menu: func(w *ws, x, y int) { w.openSpanMenuLocked(vNode, hNode, x, y) }}
 			} else if pane, dir, ok := w.ringEdgeTargetLocked(ev.X, ev.Y); ok {
 				w.pending = &pendingPress{x: ev.X, y: ev.Y,
-					menu: func(w *ws, x, y int) { w.openEdgeMenuLocked(pane, dir, x, y) }}
+					menu: func(w *ws, x, y int) {
+						w.focusPaneLocked(pane)
+						w.openEdgeMenuLocked(pane, dir, x, y)
+					}}
 			} else {
 				w.pending = &pendingPress{x: ev.X, y: ev.Y}
 			}
@@ -372,6 +403,20 @@ func (w *ws) routeMouseLocked(conn *protocol.Conn, ev input.Event) {
 	if hit.kind == hitPane {
 		w.forwardMouseLocked(hit.pane, ev)
 	}
+}
+
+// restartPaneLocked respawns a dead pane's shell — the action behind both
+// a dead pane's content click and its bar's "click to restart" label.
+func (w *ws) restartPaneLocked(paneID string) {
+	p := w.panes[paneID]
+	if p == nil {
+		return
+	}
+	if err := p.respawnIfDead(w.d.socket); err != nil {
+		w.flashStatusLocked("restart failed: " + err.Error())
+	}
+	w.dirtyPanes[paneID] = true
+	w.signalRender()
 }
 
 // focusPaneLocked moves focus with all its invariants: selection clears
@@ -440,7 +485,7 @@ func (w *ws) updateHoverLocked(x, y int) {
 	case hitTabLabel, hitNewTab, hitDetach, hitSessionMenu:
 		h.barKind, h.barTab = hit.kind, hit.tab
 		h.key = fmt.Sprintf("bb:%d:%d", hit.kind, hit.tab)
-	case hitPaneBar, hitPaneMenu:
+	case hitPaneBar, hitPaneSplit, hitPaneMenu:
 		h.bars = map[string]bool{hit.pane: true}
 		h.key = "bar:" + hit.pane
 		if vb, ok := w.cornerVBorderLocked(x, y); ok {
@@ -487,6 +532,14 @@ func (w *ws) updateHoverLocked(x, y int) {
 		}
 	}
 	if h.key != w.hover.key {
+		// The menu highlight follows the pointer only when the hovered
+		// element actually CHANGES, inside the same gate that schedules the
+		// repaint — a jiggle within one cell must never silently retarget
+		// Enter away from an arrow-key selection the screen still shows.
+		if o := w.overlay; o != nil && hit.kind == hitMenuItem &&
+			hit.item < len(o.items) && o.items[hit.item].enabled && !o.items[hit.item].separator {
+			o.sel = hit.item
+		}
 		w.hover = h
 		w.markChromeDirtyLocked()
 	}
@@ -517,11 +570,7 @@ func (w *ws) panePressLocked(conn *protocol.Conn, paneID string, ev input.Event)
 		return
 	}
 	if p.isDead() {
-		if err := p.respawnIfDead(w.d.socket); err != nil {
-			w.flashStatusLocked("restart failed: " + err.Error())
-		}
-		w.dirtyPanes[paneID] = true
-		w.signalRender()
+		w.restartPaneLocked(paneID)
 		return
 	}
 	if w.appWantsMouseLocked(p) && ev.Mods&input.Shift == 0 {
@@ -713,8 +762,7 @@ func (w *ws) pasteLocked(conn *protocol.Conn, data []byte) {
 		return
 	}
 	lines := bytes.Count(data, []byte{'\n'}) + 1
-	w.overlay = &overlay{
-		x: w.cols/2 - 20, y: w.rows / 2,
+	w.openCenteredLocked(&overlay{
 		title: fmt.Sprintf("Paste %d lines into the shell? (Enter pastes, Esc cancels)", lines),
 		items: []menuItem{
 			{label: "Paste", enabled: true, run: func(w *ws, _ *protocol.Conn) {
@@ -728,8 +776,7 @@ func (w *ws) pasteLocked(conn *protocol.Conn, data []byte) {
 			}},
 			{label: "Cancel", enabled: true, run: func(w *ws, _ *protocol.Conn) {}},
 		},
-	}
-	w.markAllDirtyLocked()
+	})
 }
 
 // pasteNeedsConfirm flags multi-line pastes and control codes a bare shell
@@ -822,62 +869,184 @@ func (w *ws) paneTitleLocked(paneID string) string {
 	return "shell"
 }
 
+// --- overlay placement ---------------------------------------------------
+
+// firstEnabledIdx returns the first runnable item, or -1.
+func firstEnabledIdx(items []menuItem) int {
+	for i, it := range items {
+		if it.enabled && !it.separator {
+			return i
+		}
+	}
+	return -1
+}
+
+// openAtLocked shows o as a dropdown with its top-left at (x, y) — the
+// anchoring for bar buttons ([+], [≡], the session ▾) — with the first
+// enabled item pre-lit so Enter always has a visible target.
+func (w *ws) openAtLocked(o *overlay, x, y int) {
+	wd, ht := w.overlaySize(o)
+	o.x = clampInt(x, 0, w.cols-wd)
+	o.y = clampInt(y, 1, w.rows-ht)
+	o.sel = firstEnabledIdx(o.items)
+	w.overlay = o
+	w.markAllDirtyLocked()
+}
+
+// openCenteredLocked shows o centered — confirm dialogs.
+func (w *ws) openCenteredLocked(o *overlay) {
+	wd, ht := w.overlaySize(o)
+	w.openAtLocked(o, (w.cols-wd)/2, (w.rows-ht)/2)
+}
+
+// openAtPointerLocked shows o so the default item's row sits directly
+// under the pointer: a second click without moving runs the default —
+// click-click splitting, no travel, no 1003 hover needed. Flippable menus
+// (primary item first, separator second) grow upward when the pointer is
+// near the bottom edge, keeping the default under the pointer. After
+// clamping, the truth rule applies: pre-lit is exactly the item under the
+// pointer, or nothing — never a remembered index the click would miss.
+func (w *ws) openAtPointerLocked(o *overlay, clickX, clickY int, flippable bool) {
+	wd, ht := w.overlaySize(o)
+	head := overlayHeadRows(o)
+	def := max(firstEnabledIdx(o.items), 0)
+	y := clickY - head - def
+	if clampInt(y, 1, w.rows-ht) != y && flippable && len(o.items) >= 2 && o.items[1].separator {
+		if yb := clickY - (ht - 1); clampInt(yb, 1, w.rows-ht) == yb {
+			// Move the primary to the last row, its rule still adjacent.
+			items := make([]menuItem, 0, len(o.items))
+			items = append(items, o.items[2:]...)
+			items = append(items, o.items[1], o.items[0])
+			o.items = items
+			y = yb
+		}
+	}
+	if y < 1 && head > 0 {
+		// The top rows of the pane area: there is no room for the title
+		// above the pointer and no downward flip exists. Drop the head —
+		// click-click must survive everywhere, and the focused perimeter
+		// still names the target.
+		o.title = ""
+		wd, ht = w.overlaySize(o)
+		head = 0
+		y = clickY - def
+	}
+	o.x = clampInt(clickX-3, 0, w.cols-wd)
+	o.y = clampInt(y, 1, w.rows-ht)
+	o.sel = -1
+	if i := clickY - o.y - head; i >= 0 && i < len(o.items) && o.items[i].enabled && !o.items[i].separator {
+		o.sel = i
+	}
+	w.overlay = o
+	w.markAllDirtyLocked()
+}
+
+// moveSelLocked moves the overlay highlight (Up/Down), wrapping and
+// skipping separators and disabled items.
+func (w *ws) moveSelLocked(delta int) {
+	o := w.overlay
+	if o == nil || len(o.items) == 0 {
+		return
+	}
+	i := o.sel
+	for range o.items {
+		i += delta
+		if i < 0 {
+			i = len(o.items) - 1
+		} else if i >= len(o.items) {
+			i = 0
+		}
+		if o.items[i].enabled && !o.items[i].separator {
+			o.sel = i
+			w.markChromeDirtyLocked()
+			return
+		}
+	}
+}
+
+// --- menus ---------------------------------------------------------------
+
 // openPaneMenuLocked is the [≡] button's menu: actions about THIS pane's
-// contents and life. Splitting is spatial now (click a window's edge), so
-// it no longer carries Split items.
+// contents and life. Splitting is spatial ([+] and window edges), so it
+// carries no Split items. Disabled items stay visible and say why —
+// discoverability (spec req 5) extends to "why can't I".
 func (w *ws) openPaneMenuLocked(paneID string, x, y int) {
 	p := w.panes[paneID]
 	if p == nil {
 		return
 	}
 	hasSel := w.sel.exists && w.sel.pane == paneID
+	hasClip := len(w.clip) > 0
 	dead := p.isDead()
-	w.overlay = &overlay{
-		x: x, y: y, pane: paneID,
+	canClose := w.lay.CountPanes() > 1
+	reason := func(label string, on bool, why string) string {
+		if on {
+			return label
+		}
+		return label + " — " + why
+	}
+	w.openAtLocked(&overlay{
+		pane:  paneID,
 		title: w.paneTitleLocked(paneID),
 		items: []menuItem{
-			{label: "Copy", enabled: hasSel, run: func(w *ws, c *protocol.Conn) { w.copySelectionLocked(c) }},
-			{label: "Paste", enabled: len(w.clip) > 0, run: func(w *ws, c *protocol.Conn) { w.pasteLocked(c, append([]byte(nil), w.clip...)) }},
-			{label: "Restart Shell", enabled: dead, run: func(w *ws, _ *protocol.Conn) {
-				if pp := w.panes[paneID]; pp != nil {
-					_ = pp.respawnIfDead(w.d.socket)
-				}
-			}},
-			{label: "Close Pane", enabled: w.lay.CountPanes() > 1, run: func(w *ws, _ *protocol.Conn) { w.actionClosePaneLocked(paneID) }},
+			{label: reason("Copy", hasSel, "select text first"), enabled: hasSel,
+				run: func(w *ws, c *protocol.Conn) { w.copySelectionLocked(c) }},
+			{label: reason("Paste", hasClip, "clipboard empty"), enabled: hasClip,
+				run: func(w *ws, c *protocol.Conn) { w.pasteLocked(c, append([]byte(nil), w.clip...)) }},
+			{separator: true},
+			{label: reason("Restart Shell", dead, "still running"), enabled: dead,
+				run: func(w *ws, _ *protocol.Conn) {
+					if pp := w.panes[paneID]; pp != nil {
+						_ = pp.respawnIfDead(w.d.socket)
+					}
+				}},
+			{label: reason("Close Pane", canClose, "last pane"), enabled: canClose,
+				run: func(w *ws, _ *protocol.Conn) { w.actionClosePaneLocked(paneID) }},
 		},
+	}, x, y)
+}
+
+// splitItems builds the four-direction split list for one window: the
+// primary direction first (the default under the pointer), a rule, then
+// the rest in fixed ↑ ↓ ← → order. Every item splits THIS pane;
+// Layout.Split joins a same-axis run and nests a container on the cross
+// axis, exactly like i3.
+func splitItems(paneID string, primary layout.Dir) []menuItem {
+	items := make([]menuItem, 0, 5)
+	add := func(d layout.Dir) {
+		items = append(items, menuItem{label: splitLabel(d), enabled: true,
+			run: func(w *ws, _ *protocol.Conn) { w.actionSplitLocked(paneID, d) }})
 	}
-	w.markAllDirtyLocked()
+	add(primary)
+	items = append(items, menuItem{separator: true})
+	for _, d := range []layout.Dir{layout.SplitUp, layout.SplitDown, layout.SplitLeft, layout.SplitRight} {
+		if d != primary {
+			add(d)
+		}
+	}
+	return items
 }
 
 // openEdgeMenuLocked opens the directional split menu for one window's
-// edge (i3-style): the clicked side's direction first — the default the
-// pointer is already on — then the two perpendicular directions. Every
-// item splits THIS pane; Layout.Split joins a same-axis run and nests a
-// container on the cross axis, exactly like i3.
+// edge (i3-style, pointer-anchored): click-click on the edge runs the
+// clicked side's direction.
 func (w *ws) openEdgeMenuLocked(paneID string, primary layout.Dir, x, y int) {
 	if _, ok := w.panes[paneID]; !ok {
 		return
 	}
-	items := make([]menuItem, 0, 3)
-	for _, d := range append([]layout.Dir{primary}, crossAxis(primary)...) {
-		dd := d
-		items = append(items, menuItem{
-			label:   splitLabel(dd),
-			enabled: true,
-			run:     func(w *ws, _ *protocol.Conn) { w.actionSplitLocked(paneID, dd) },
-		})
-	}
-	w.overlay = &overlay{x: x, y: y, pane: paneID, title: w.paneTitleLocked(paneID), items: items}
-	w.markAllDirtyLocked()
+	o := &overlay{pane: paneID, title: w.paneTitleLocked(paneID), items: splitItems(paneID, primary)}
+	w.openAtPointerLocked(o, x, y, true)
 }
 
-// crossAxis returns the two directions perpendicular to d — the
-// along-the-edge options offered alongside the edge's own direction.
-func crossAxis(d layout.Dir) []layout.Dir {
-	if d == layout.SplitUp || d == layout.SplitDown {
-		return []layout.Dir{layout.SplitLeft, layout.SplitRight}
+// openSplitMenuLocked is the [+] button's dropdown: the same four
+// directions, for terminals (and first runs) where a 1-cell border is not
+// a discoverable target.
+func (w *ws) openSplitMenuLocked(paneID string, x, y int) {
+	if _, ok := w.panes[paneID]; !ok {
+		return
 	}
-	return []layout.Dir{layout.SplitUp, layout.SplitDown}
+	o := &overlay{pane: paneID, title: w.paneTitleLocked(paneID), items: splitItems(paneID, layout.SplitRight)}
+	w.openAtLocked(o, x, y)
 }
 
 func splitLabel(d layout.Dir) string {
@@ -1006,6 +1175,9 @@ func (w *ws) openSpanMenuLocked(vNode, hNode *layout.Node, x, y int) {
 		)
 	}
 	if hNode != nil {
+		if len(items) > 0 {
+			items = append(items, menuItem{separator: true})
+		}
 		items = append(items,
 			w.spanItem("← New pane left — full height", hNode, layout.SplitLeft),
 			w.spanItem("→ New pane right — full height", hNode, layout.SplitRight),
@@ -1014,8 +1186,7 @@ func (w *ws) openSpanMenuLocked(vNode, hNode *layout.Node, x, y int) {
 	if len(items) == 0 {
 		return
 	}
-	w.overlay = &overlay{x: x, y: y, title: "Across", items: items}
-	w.markAllDirtyLocked()
+	w.openAtPointerLocked(&overlay{title: "Across", items: items}, x, y, false)
 }
 
 // ringCornerLocked detects an outer-ring junction and returns the container
@@ -1038,34 +1209,62 @@ func (w *ws) ringCornerLocked(x, y int) (vNode, hNode *layout.Node, ok bool) {
 }
 
 // openSessionMenuLocked lives behind the session bar's project segment
-// (ratified): session-level actions.
+// (ratified): session-level actions, and the theme picker's home — the
+// label always names the active preset, so the state shows before any
+// click.
 func (w *ws) openSessionMenuLocked(x, y int) {
-	w.overlay = &overlay{
-		x: x, y: y,
+	w.openAtLocked(&overlay{
 		title: "Session",
 		items: []menuItem{
 			{label: "New Tab", enabled: true, run: func(w *ws, _ *protocol.Conn) { w.actionNewTabLocked() }},
+			{separator: true},
+			{label: "Theme — " + w.d.themeNow().name, enabled: true,
+				run: func(w *ws, _ *protocol.Conn) { w.openThemePickerLocked(x, y) }},
+			{separator: true},
 			{label: "Detach (Ctrl+Shift+E)", enabled: true, run: func(w *ws, c *protocol.Conn) { w.detachClientLocked(c) }},
-			{label: "Kill Session…", enabled: true, run: func(w *ws, _ *protocol.Conn) { w.openKillConfirmLocked() }},
+			{label: "Kill Session…", enabled: true, danger: true, run: func(w *ws, _ *protocol.Conn) { w.openKillConfirmLocked() }},
 		},
+	}, x, y)
+}
+
+// openThemePickerLocked lists the presets, ● marking the active one.
+// Choosing a preset applies it live to every session and client, persists
+// it, and re-opens the picker in place — presets can be cycled and
+// compared click by click, and Esc keeps whatever is showing.
+func (w *ws) openThemePickerLocked(x, y int) {
+	cur := w.d.themeNow().name
+	items := make([]menuItem, 0, len(themes))
+	sel := 0
+	for i := range themes {
+		t := &themes[i]
+		mark := "○ "
+		if t.name == cur {
+			mark, sel = "● ", i
+		}
+		items = append(items, menuItem{label: mark + t.name, enabled: true,
+			run: func(w *ws, _ *protocol.Conn) {
+				w.d.theme.Store(t)            // atomic: safe under w.mu, visible to all renders
+				go w.d.persistTheme()         // prefs + other sessions; never under w.mu
+				w.openThemePickerLocked(x, y) // sticky: the click re-opens the picker
+			}})
 	}
-	w.markAllDirtyLocked()
+	o := &overlay{title: "Theme", items: items}
+	w.openAtLocked(o, x, y)
+	o.sel = sel
 }
 
 func (w *ws) openKillConfirmLocked() {
-	w.overlay = &overlay{
-		x: w.cols/2 - 22, y: w.rows / 2,
+	w.openCenteredLocked(&overlay{
 		title: "Kill this session? Every shell in it dies.",
 		items: []menuItem{
-			{label: "Kill Session", enabled: true, run: func(w *ws, _ *protocol.Conn) {
+			{label: "Kill Session", enabled: true, danger: true, run: func(w *ws, _ *protocol.Conn) {
 				root := w.root
 				d := w.d
 				go d.killFromUI(root) // re-enters the daemon lock; never under w.mu
 			}},
 			{label: "Cancel", enabled: true, run: func(w *ws, _ *protocol.Conn) {}},
 		},
-	}
-	w.markAllDirtyLocked()
+	})
 }
 
 func (w *ws) closeOverlayLocked() {
@@ -1077,7 +1276,7 @@ func (w *ws) closeOverlayLocked() {
 
 func (w *ws) runItemLocked(conn *protocol.Conn, i int) {
 	o := w.overlay
-	if o == nil || i < 0 || i >= len(o.items) || !o.items[i].enabled {
+	if o == nil || i < 0 || i >= len(o.items) || !o.items[i].enabled || o.items[i].separator {
 		return
 	}
 	w.overlay = nil
@@ -1085,15 +1284,11 @@ func (w *ws) runItemLocked(conn *protocol.Conn, i int) {
 	o.items[i].run(w, conn)
 }
 
-func (w *ws) runFirstEnabledLocked(conn *protocol.Conn) {
-	o := w.overlay
-	if o == nil {
-		return
-	}
-	for i, it := range o.items {
-		if it.enabled {
-			w.runItemLocked(conn, i)
-			return
-		}
+// runSelectedLocked is Enter: exactly the highlighted item. When nothing
+// is lit (truth rule after clamping) Enter runs nothing — never a
+// remembered or implicit index the screen does not show.
+func (w *ws) runSelectedLocked(conn *protocol.Conn) {
+	if o := w.overlay; o != nil {
+		w.runItemLocked(conn, o.sel)
 	}
 }

@@ -1,7 +1,7 @@
 # tide — current state
 
 *Living document; update at the end of each increment.*
-*Last updated 2026-06-17 (teddy T1). Product contract: [tide-spec-v1.md](tide-spec-v1.md).*
+*Last updated 2026-07-05 (silent bars + [+] + click-click menus + themes). Product contract: [tide-spec-v1.md](tide-spec-v1.md).*
 
 ## Where we are
 
@@ -31,6 +31,7 @@ internal/daemon     daemon: locks, serve loop, session lifecycle, exit-with-last
   ws.go             per-session workspace: clients, layout, selection, clipboard, render loop
   compositor.go     bar/panes/borders/overlays → ANSI frames + the clickable hitmap
   router.go         the one shared input layer: keymap, mouse routing, menus, paste guards
+  theme.go          the six 16-color presets and their contrast invariants
   pane.go           one shell on a PTY parsed into a VT grid; hooks up to the workspace
 internal/layout     tab/split tree: exact tiling geometry, JSON round-trip
 internal/input      input decoder (legacy/kitty/SGR/X10/paste/focus) + per-pane re-encoder
@@ -64,35 +65,49 @@ protocol; the bar's '-' button covers every terminal). Everything else is
 re-encoded per the destination pane's own terminal modes and forwarded.
 
 **Mouse-first, discoverable (pane frames + window-centric edge splits,
-i3-style, ruled 2026-06-19).** Every pane is framed from the start; its top
-border is a bar — title left, [≡] pane-menu button right
-(Copy/Paste/Restart Shell/Close Pane), focused pane highlighted. The lower
-pane's bar IS the stacked divider (shared edges render once). The model is
-i3's: every frame cell is the EDGE of the window beside it, and clicking an
-edge (press+release in place) opens a compact directional menu scoped to
-THAT window — the clicked side's direction first, then the two perpendicular
-ones — each item a `Layout.Split` (same-axis joins the run, perpendicular
-nests a container). The outer ring is segmented per window, so the bottom
-strip under the right pane is the right pane's own bottom edge. Junction
-cells (┬┴├┤┼, and the ┴ where a divider meets the bottom ring) instead open
-a full-span menu — full-width above/below, or full-height left/right, of the
-container the boundary divides — so a full-width pane below an L|R split is
-one click on the ┴. Press+drag still resizes (corners grab both axes). On
-terminals reporting bare motion (1003; not stock macOS Terminal.app), the
-edge under the pointer highlights in heavy strokes. The session bar's project segment (▾) opens the session menu (New
-Tab/Detach/Kill Session…); '+' and '-' stay. Nothing requires
-right-click (macOS Terminal.app never forwards it), but it remains a
-pane-menu accelerator where terminals do. Wheel scrolls daemon-side
-scrollback; apps that request mouse reporting get translated events with
-press-grab drag semantics; Shift bypasses to tide.
+i3-style, ruled 2026-06-19; gestures amended 2026-07-05).** Every pane is
+framed from the start; its top border is a bar — title left, [+] split and
+[≡] pane-menu buttons right, focused pane highlighted. The lower pane's
+bar IS the stacked divider (shared edges render once). Bars are focus and
+drag handles, NEVER menus (i3: clicking a title bar focuses, period — the
+most frequent gesture is 100% side-effect-free); splitting lives on [+]
+and on the window's edges. The model is i3's: every frame cell is the
+EDGE of the window beside it, and clicking an edge (press+release in
+place; 3×3 slop on non-draggables) opens the four-direction split menu
+ANCHORED so the clicked side's item sits pre-highlighted under the
+pointer — click-click on one cell splits the obvious way, no 1003 hover
+required; at the bottom ring the menu flips upward; after clamping the
+truth rule pre-lights exactly the item under the pointer. Focus follows
+border and ring-segment clicks. Each item is a `Layout.Split` (same-axis
+joins the run, perpendicular nests a container). The outer ring is
+segmented per window. Junction cells (┬┴├┤┼, and the ┴ where a divider
+meets the bottom ring) instead open a full-span menu — full-width
+above/below, or full-height left/right, of the container the boundary
+divides. Press+drag still resizes on first motion (corners grab both
+axes; deliberate 1-cell resizes stay instant). Menus take Up/Down + Enter.
+On terminals reporting bare motion (1003; not stock macOS Terminal.app),
+the edge under the pointer highlights in heavy strokes. The session bar's
+project segment (▾) opens the session menu (New Tab/Theme/Detach/Kill
+Session…); '+' and '-' stay. Nothing requires right-click (macOS
+Terminal.app never forwards it), but it remains a pane-menu accelerator
+where terminals do. Wheel scrolls daemon-side scrollback; apps that
+request mouse reporting get translated events with press-grab drag
+semantics; Shift bypasses to tide.
 
 **Theme.** Built strictly from the terminal's own 16-color palette and
-default fg/bg — tide inherits the user's theme, adapts to light/dark, and
-needs no truecolor. One ANSI-cyan accent carries all signaling: focused
-pane perimeter, accent pills for the project segment and active tab,
-hover brightening on every interactive element. Rounded corners
-throughout; menu hierarchy via a soft surface with dimmed titles; exited
-panes tint red. The palette is one constant block in compositor.go.
+default fg/bg — tide inherits the user's palette, adapts to light/dark,
+and needs no truecolor. One user-selectable accent slot pair carries all
+signaling (focused perimeter, accent pills, hover strokes, menu title):
+six presets — Tide/cyan (default), Ocean, Moss, Plum, Ember, and Ink, a
+no-chroma reverse-video fallback for degenerate palettes — picked from
+the session menu's sticky Theme picker, applied live to every session and
+client, persisted daemon-globally in prefs.json (UI-written only).
+Popups are borderless cards: title + dim rule + items, group separators,
+readable dim disabled items that state their reason ("Copy — select text
+first"), red destructive items, pre-lit default. Red is reserved for
+dead panes ("(exited) — click to restart") and destructive actions in
+every preset; no style pairs fg and bg from the same palette slot. The
+presets live in theme.go; the struct is read per-frame by the compositor.
 
 **Sessions and persistence.** Identity = canonical project root; layout
 (tabs, splits, ratios, focus) persists in sessions.json on every
@@ -115,7 +130,7 @@ scrubbed environment (spec: capability model).
 
 - `./cli.sh {build,test,check,ci,shell}` — pinned Docker toolchain,
   `--network=none` (the offline-build constraint re-proven every run).
-- 110 tests, `-race` clean: unit, PTY integration against real shells, the
+- 269 tests, `-race` clean: unit, PTY integration against real shells, the
   spec acceptance test, and UI flows driven through real input bytes.
 - Substantial increments pass a multi-agent adversarial review before
   commit (the interaction layer fixed 26 confirmed findings, incl. a

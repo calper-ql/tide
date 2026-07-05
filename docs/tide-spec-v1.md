@@ -326,6 +326,62 @@ Capabilities ship as first-party standalone tools that attach to the session
   it can open), `drag_start`/`drag_drop`, and `open{path}`. Clipboard and
   keymap fetch are designed-for but deferred; teddy mirrors tide's CUA
   defaults locally until then.
+
+- **Silent bars, [+] split button, click-click menus** *(ruled 2026-07-05;
+  amends "Window-centric edge splits" and the two-menu model's gestures)*.
+  The owner's verdict on the built edge-split model: clicking borders to
+  make panes worked but felt subpar to i3/tmux. Three amendments:
+  - **Bars are focus and drag handles, never menus.** A pane bar's
+    press+release no longer opens the layout menu — i3's rule: clicking a
+    title bar focuses, period; the most frequent gesture must be 100%
+    side-effect-free. Bars stay reserved for the ratified-but-unbuilt
+    move-drag increment. Two exceptions: the junction where a divider bar
+    meets a vertical border keeps its full-span menu (junction semantics,
+    not bar semantics — and junction clicks never move focus), and a DEAD
+    pane's bar honors its own label — it reads "(exited) — click to
+    restart" where it fits, and clicking it restarts the shell.
+  - **Every bar carries a `[+]` split button** left of `[≡]`, opening the
+    four-direction split menu for that window — the visible affordance
+    replacing bar-as-top-edge (requirement 5 on the no-hover baseline; a
+    1-cell border is not a first-time-user affordance). On narrow panes
+    `[+]` drops before the bar does. This deliberately moves the
+    directional splits back behind a bar button; the `[≡]` menu itself
+    remains split-free (Copy/Paste/Restart/Close, disabled items visible
+    with the reason stated).
+  - **Edge menus list all FOUR directions** — the clicked side first and
+    pre-highlighted — and open ANCHORED so the default item's row sits
+    under the pointer: click-click on one cell splits the obvious way,
+    zero travel, no 1003 hover required. At the bottom ring the menu flips
+    upward (primary moved to the last row, still under the pointer). After
+    clamping, the truth rule applies: whatever item actually sits under
+    the pointer is what is pre-lit and what a second click runs — never a
+    remembered index. Focus follows border/ring-segment clicks (never
+    junction clicks), so the accent perimeter names the split target.
+    Non-draggable presses get a 3×3 release slop (a jittery click is still
+    a click); draggable borders keep first-motion drag conversion so a
+    deliberate 1-cell resize stays instant. Menus gain Up/Down + Enter as
+    keyboard accelerators.
+- **Popups are borderless surfaces** *(ruled 2026-07-05)*. A popup is a
+  card: title row, dim rule, items, dim rules as group separators — no box
+  drawing; its distinct background is the boundary. Disabled items render
+  in a readable dim (never fg and bg from the same palette slot — the bug
+  class that made dim rows invisible) and state why they are disabled.
+  Destructive items render red at rest. The highlighted item is pre-lit
+  from open (the anchored default), and moves with pointer hover or
+  Up/Down.
+- **Theme presets** *(ruled 2026-07-05)*. The chrome accent is user
+  selectable: six curated presets (Tide/cyan default, Ocean/blue,
+  Moss/green, Plum/magenta, Ember/yellow, and Ink — a no-chroma
+  reverse-video fallback whose contrast cannot fail on any palette), all
+  built strictly from the 16-color palette. Red stays reserved for dead
+  panes and destructive items in every preset. The picker lives in the
+  session menu ("Theme — <Name>"), applies live to every session and
+  client on click, re-opens in place so presets can be compared, and
+  persists daemon-globally to `prefs.json` beside `sessions.json`
+  (UI-written only — config files remain a non-concept; a missing,
+  corrupt, or unknown value falls back to Tide and never blocks an
+  attach). Invariant for all presets: no style pairs fg and bg from the
+  same palette slot; chroma never carries meaning alone.
 - **teddy delivery phasing** *(ruled 2026-06-17)*. **T1** ships teddy
   standalone (chrome, file browser, tabs with in-strip reorder, minimal
   editing, chroma highlighting, markdown viz) — a UX-exploration increment:

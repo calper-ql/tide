@@ -62,10 +62,11 @@ type dragState struct {
 	lastY      int
 }
 
-// pendingPress disambiguates frame gestures (ratified two-menu model):
-// press+motion becomes a border drag (when there is a border to drag),
-// press+release in place opens the boundary menu built for the pressed
-// element.
+// pendingPress disambiguates frame gestures: press+motion becomes a border
+// drag (when there is a border to drag — first motion converts, so 1-cell
+// resizes stay instant), press+release in place opens the menu built for
+// the pressed element. Elements with nothing to drag get a 3×3 release
+// slop instead, so a jittery click still opens its menu.
 type pendingPress struct {
 	x, y       int
 	menu       func(w *ws, x, y int)
@@ -94,6 +95,7 @@ type ws struct {
 	logf *log.Logger
 
 	mu       sync.Mutex
+	th       *theme // theme in effect for the frame being rendered (set by renderLocked)
 	lay      *layout.Layout
 	panes    map[string]*pane
 	clients  map[*protocol.Conn]*wsClient
@@ -138,6 +140,7 @@ func newWS(d *daemon, root string, stored session.Session, cols, rows int) (*ws,
 		quit:       make(chan struct{}),
 	}
 	w.host, _ = os.Hostname() // shown in the bar so you know which machine you're on
+	w.th = d.themeNow()
 	w.setSizeLocked(cols, rows)
 
 	if len(stored.Layout) > 0 {

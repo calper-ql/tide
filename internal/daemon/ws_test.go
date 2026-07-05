@@ -148,6 +148,34 @@ func hitCenter(t *testing.T, w *ws, kind hitKind) (int, int) {
 	return 0, 0
 }
 
+// lowerPaneSplitButton locates the [+] button on the divider bar — the
+// bar (and button) belonging to the LOWER pane of a stack.
+func lowerPaneSplitButton(t *testing.T, w *ws, s *sink) (int, int) {
+	t.Helper()
+	var sx, sy int
+	s.waitFor(t, "divider [+] in hitmap", func() bool {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		lower := ""
+		for _, h := range w.hits {
+			if h.kind == hitPaneBar && h.hasBorder {
+				lower = h.pane
+			}
+		}
+		if lower == "" {
+			return false
+		}
+		for _, h := range w.hits {
+			if h.kind == hitPaneSplit && h.pane == lower {
+				sx, sy = h.rect.X+1, h.rect.Y
+				return true
+			}
+		}
+		return false
+	})
+	return sx, sy
+}
+
 func press(x, y int) []byte   { return []byte(fmt.Sprintf("\x1b[<0;%d;%dM", x+1, y+1)) }
 func rclick(x, y int) []byte  { return []byte(fmt.Sprintf("\x1b[<2;%d;%dM", x+1, y+1)) }
 func release(x, y int) []byte { return []byte(fmt.Sprintf("\x1b[<0;%d;%dm", x+1, y+1)) }
@@ -520,7 +548,9 @@ func TestStackedSplitBarIsDividerAndDraggable(t *testing.T) {
 		}
 	})
 
-	// A click (no motion) on a pane bar opens the layout menu for that pane.
+	// A click (no motion) on a pane bar focuses but NEVER opens a menu —
+	// bars are focus/drag handles, i3-style: clicking a title bar focuses,
+	// period. Splitting lives on the [+] button and the window's edges.
 	var clickX, clickY int
 	withWS(w, func() {
 		for _, h := range w.hits {
@@ -532,7 +562,18 @@ func TestStackedSplitBarIsDividerAndDraggable(t *testing.T) {
 	})
 	w.handleInput(conn, press(clickX, clickY))
 	w.handleInput(conn, release(clickX, clickY))
-	s.waitFor(t, "boundary menu from bar click", func() bool { return s.contains("New pane") })
+	time.Sleep(100 * time.Millisecond)
+	withWS(w, func() {
+		if w.overlay != nil {
+			t.Fatalf("bar click must not open a menu (bars are focus handles); got %q", w.overlay.title)
+		}
+	})
+
+	// The [+] button is the visible split affordance on every bar.
+	sx, sy := hitCenter(t, w, hitPaneSplit)
+	w.handleInput(conn, press(sx, sy))
+	w.handleInput(conn, release(sx, sy))
+	s.waitFor(t, "split menu from [+]", func() bool { return s.contains("New pane") })
 }
 
 func TestCornerDragResizesBothAxes(t *testing.T) {
@@ -609,30 +650,19 @@ func TestCornerDragResizesBothAxes(t *testing.T) {
 	})
 }
 
-// TestEdgeMenuSplitsOneWindow pins the window-centric model: the divider
-// between two stacked panes is the LOWER pane's top edge, and "new pane
-// right" from it splits just that one window — the new pane sits beside the
-// lower pane only, not the whole stack at full height.
+// TestEdgeMenuSplitsOneWindow pins the window-centric model: the [+] on
+// the divider bar belongs to the LOWER pane, and "new pane right" from it
+// splits just that one window — the new pane sits beside the lower pane
+// only, not the whole stack at full height.
 func TestEdgeMenuSplitsOneWindow(t *testing.T) {
 	w, conn, s := newTestWS(t)
 	s.waitFor(t, "first frame", func() bool { return s.contains("1:") })
 	withWS(w, func() { w.actionSplitLocked(w.lay.FocusedPane(), layout.SplitDown) })
 
-	var barX, barY int
-	s.waitFor(t, "divider bar in hitmap", func() bool {
-		w.mu.Lock()
-		defer w.mu.Unlock()
-		for _, h := range w.hits {
-			if h.kind == hitPaneBar && h.hasBorder {
-				barX, barY = h.rect.X+2, h.rect.Y
-				return true
-			}
-		}
-		return false
-	})
-	w.handleInput(conn, press(barX, barY))
-	w.handleInput(conn, release(barX, barY))
-	s.waitFor(t, "edge menu", func() bool { return s.contains("→ New pane right") })
+	sx, sy := lowerPaneSplitButton(t, w, s)
+	w.handleInput(conn, press(sx, sy))
+	w.handleInput(conn, release(sx, sy))
+	s.waitFor(t, "split menu", func() bool { return s.contains("→ New pane right") })
 	menuClick(t, w, conn, "→ New pane right")
 
 	s.waitFor(t, "three panes", func() bool {
@@ -831,28 +861,17 @@ func TestRingCornerSplitsFullWidth(t *testing.T) {
 	})
 }
 
-// TestDividerTopEdgeInsertsAbove pins that a stacked divider is the LOWER
-// pane's top edge: "new pane above" from it (the menu's default) inserts a
-// pane between the two, keeping one full-width stack.
+// TestDividerTopEdgeInsertsAbove pins that a stacked divider belongs to
+// the LOWER pane: "new pane above" from its [+] menu inserts a pane
+// between the two, keeping one full-width stack.
 func TestDividerTopEdgeInsertsAbove(t *testing.T) {
 	w, conn, s := newTestWS(t)
 	s.waitFor(t, "first frame", func() bool { return s.contains("1:") })
 	withWS(w, func() { w.actionSplitLocked(w.lay.FocusedPane(), layout.SplitDown) })
-	var barX, barY int
-	s.waitFor(t, "divider bar in hitmap", func() bool {
-		w.mu.Lock()
-		defer w.mu.Unlock()
-		for _, h := range w.hits {
-			if h.kind == hitPaneBar && h.hasBorder {
-				barX, barY = h.rect.X+2, h.rect.Y
-				return true
-			}
-		}
-		return false
-	})
-	w.handleInput(conn, press(barX, barY))
-	w.handleInput(conn, release(barX, barY))
-	s.waitFor(t, "edge menu", func() bool { return s.contains("↑ New pane above") })
+	sx, sy := lowerPaneSplitButton(t, w, s)
+	w.handleInput(conn, press(sx, sy))
+	w.handleInput(conn, release(sx, sy))
+	s.waitFor(t, "split menu", func() bool { return s.contains("↑ New pane above") })
 	menuClick(t, w, conn, "↑ New pane above")
 	s.waitFor(t, "three stacked panes", func() bool {
 		w.mu.Lock()

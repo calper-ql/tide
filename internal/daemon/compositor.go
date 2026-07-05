@@ -28,6 +28,7 @@ const (
 	hitSessionMenu // the project-name segment (ratified: session menu)
 	hitPane        // pane CONTENT (inside the frame)
 	hitPaneBar     // a pane's top-border bar; doubles as the stacked-divider drag handle
+	hitPaneSplit   // the [+] button in a pane bar: the visible split affordance
 	hitPaneMenu    // the [≡] button in a pane bar
 	hitBorder      // shared vertical border between side-by-side panes
 	hitFrameEdge   // outer ring cells; owner pane resolved by adjacency
@@ -58,42 +59,26 @@ func (w *ws) hitAtLocked(x, y int) hitRegion {
 }
 
 type menuItem struct {
-	label   string
-	enabled bool
-	run     func(w *ws, origin *protocol.Conn)
+	label     string
+	enabled   bool
+	separator bool // a dim rule row: not hittable, skipped by Enter/arrows
+	danger    bool // destructive action: red at rest
+	run       func(w *ws, origin *protocol.Conn)
 }
 
 // overlay is a popup: a context menu, or a confirm dialog (a titled menu).
-// Enter runs the first enabled item, Esc closes (also stated in the title
-// bar of confirms — hidden behind a click is fine, hidden behind knowledge
-// is not).
+// sel is the highlighted item — pre-lit when the menu opens (so click-click
+// runs the default and Enter is advertised without needing 1003 hover) and
+// moved by pointer hover or Up/Down. Esc closes; a click outside closes.
 type overlay struct {
-	x, y  int // anchor (clamped into the screen at render time)
+	x, y  int // top-left (clamped into the screen at render time)
 	title string
 	items []menuItem
 	pane  string // context pane
+	sel   int    // highlighted item; -1 none
 }
 
-// The theme is built strictly from the terminal's own 16-color palette and
-// default fg/bg, so tide inherits whatever theme the user's terminal
-// wears: one accent (ANSI cyan — re-themed by the user's palette), dim
-// structure, a soft reverse strip for the session bar. No hardcoded RGB:
-// it adapts to light and dark themes alike and survives terminals without
-// truecolor (stock macOS Terminal.app included).
-const (
-	sgrReset = "\x1b[0m"
-
-	thAccent    = "\x1b[0;1;36m"   // interactive emphasis (text on default bg)
-	thAccentBar = "\x1b[0;7;1;36m" // accent "pill" on the chrome strip
-	thBar       = "\x1b[0;7;2m"    // session bar base: soft adaptive strip
-	thFrame     = "\x1b[0;2m"      // pane frames at rest
-	thFocus     = "\x1b[0;36m"     // focused pane frame/bar
-	thHover     = "\x1b[0;1;96m"   // hovered boundary: bright accent, heavy strokes
-	thMenu      = "\x1b[0;100;97m" // popup surface: bright-black bg, bright text
-	thMenuDim   = "\x1b[0;100;90m" // disabled item
-	thMenuHover = "\x1b[0;7;1;36m" // item under the pointer
-	thDead      = "\x1b[0;2;31m"   // exited pane bar
-)
+const sgrReset = "\x1b[0m"
 
 func cup(b *bytes.Buffer, y, x int) {
 	fmt.Fprintf(b, "\x1b[%d;%dH", y+1, x+1)
@@ -111,6 +96,7 @@ func (w *ws) renderLocked() []byte {
 	if w.flash != "" && time.Now().After(w.flashOff) {
 		w.flash = ""
 	}
+	w.th = w.d.themeNow() // one theme per frame; switches land atomically
 	var b bytes.Buffer
 	b.WriteString("\x1b[?25l" + sgrReset)
 	full := w.allDirty
@@ -190,7 +176,7 @@ func (w *ws) barSeg(b *bytes.Buffer, col int, text, style string, kind hitKind, 
 // '-' detach button at the far right (ratified: bar on top, '-' detaches).
 func (w *ws) renderBarLocked(b *bytes.Buffer) {
 	cup(b, 0, 0)
-	b.WriteString(thBar)
+	b.WriteString(w.th.bar)
 	b.WriteString(strings.Repeat(" ", w.cols)) // paint the row, then place segments
 	cup(b, 0, 0)
 
@@ -199,10 +185,9 @@ func (w *ws) renderBarLocked(b *bytes.Buffer) {
 		base = base[i+1:]
 	}
 	// Bar buttons brighten under the pointer (1003 terminals).
-	const hoverPill = "\x1b[0;7;1;96m"
 	seg := func(kind hitKind, tab int, base string) string {
 		if w.hover.barKind == kind && (kind != hitTabLabel || w.hover.barTab == tab) {
-			return hoverPill
+			return w.th.barHover
 		}
 		return base
 	}
@@ -214,24 +199,26 @@ func (w *ws) renderBarLocked(b *bytes.Buffer) {
 	if w.host != "" {
 		label = runewidth.Truncate(w.host, 24, "…") + ":" + label
 	}
-	col := w.barSeg(b, 0, " "+label+" ▾", seg(hitSessionMenu, 0, thAccentBar), hitSessionMenu, 0)
-	col = w.barSeg(b, col, "▏", thBar, hitNone, 0)
+	col := w.barSeg(b, 0, " "+label+" ▾", seg(hitSessionMenu, 0, w.th.accentBar), hitSessionMenu, 0)
+	col = w.barSeg(b, col, "▏", w.th.bar, hitNone, 0)
 
 	for i, tab := range w.lay.Tabs {
-		style := thBar
+		style := w.th.bar
 		if i == w.lay.Active {
-			style = thAccentBar
+			style = w.th.accentBar
 		}
 		col = w.barSeg(b, col, " "+fmt.Sprintf("%d:%s", i+1, w.tabTitleLocked(tab))+" ", seg(hitTabLabel, i, style), hitTabLabel, i)
 	}
-	col = w.barSeg(b, col, " + ", seg(hitNewTab, 0, thBar), hitNewTab, 0)
+	col = w.barSeg(b, col, " + ", seg(hitNewTab, 0, w.th.bar), hitNewTab, 0)
 
 	// Right side: transient status / scroll indicator, then the detach
-	// button pinned to the corner.
-	status := w.flash
+	// button pinned to the corner. Flashes pop (bold reverse); the scroll
+	// indicator is ambient and stays on the bar's soft strip.
+	status, statusStyle := w.flash, w.th.flash
 	if status == "" {
 		if s := w.scroll[w.lay.FocusedPane()]; s > 0 {
 			status = fmt.Sprintf("SCROLL %d — wheel down or any key to resume", s)
+			statusStyle = w.th.bar
 		}
 	}
 	detach := " ─ detach "
@@ -243,13 +230,13 @@ func (w *ws) renderBarLocked(b *bytes.Buffer) {
 		if avail := w.cols - dw - col - 3; avail >= 8 {
 			status = runewidth.Truncate(status, avail, "…")
 			cup(b, 0, w.cols-dw-runewidth.StringWidth(status)-2)
-			b.WriteString(thBar + status)
+			b.WriteString(statusStyle + status)
 		}
 	}
 	cup(b, 0, w.cols-dw)
-	detachStyle := thAccentBar
+	detachStyle := w.th.accentBar
 	if w.hover.barKind == hitDetach {
-		detachStyle = "\x1b[0;7;1;96m"
+		detachStyle = w.th.barHover
 	}
 	b.WriteString(detachStyle + detach + sgrReset)
 	w.hits = append(w.hits, hitRegion{rect: layout.Rect{X: w.cols - dw, Y: 0, W: dw, H: 1}, kind: hitDetach})
@@ -287,7 +274,7 @@ func sanitizeLabel(s string) string {
 // renderFrameLocked draws the outer ring and the shared vertical borders
 // (full renders only; bars and contents overwrite their own cells after).
 func (w *ws) renderFrameLocked(b *bytes.Buffer) {
-	b.WriteString(thFrame)
+	b.WriteString(w.th.frame)
 	top, bottom := w.area.Y, w.rows-1
 	// Side columns.
 	for y := top; y < bottom; y++ {
@@ -326,7 +313,7 @@ func (w *ws) renderFrameLocked(b *bytes.Buffer) {
 	// rests on the ring) pick up the accent, Zellij-style — "where am I"
 	// at a glance. Bars re-stamp their junction cells right after.
 	if r, ok := w.rects[w.lay.FocusedPane()]; ok {
-		b.WriteString(thFocus)
+		b.WriteString(w.th.focus)
 		for y := r.Y; y < r.Y+r.H; y++ {
 			cup(b, y, r.X-1)
 			b.WriteString("│")
@@ -342,23 +329,25 @@ func (w *ws) renderFrameLocked(b *bytes.Buffer) {
 }
 
 // renderPaneBarLocked draws a pane's top border as its bar — title left,
-// [≡] menu button right (ratified) — including the junction characters in
-// the flanking border columns. A bar that coincides with a stacked divider
-// carries that border so the router can drag it.
+// [+] split and [≡] menu buttons right — including the junction characters
+// in the flanking border columns. A bar that coincides with a stacked
+// divider carries that border so the router can drag it. On narrow panes
+// [+] drops before the bar does: the bar is also the focus handle.
 func (w *ws) renderPaneBarLocked(b *bytes.Buffer, id string, r layout.Rect, focused bool, barBorder map[[2]int]layout.Border) {
 	if r.W < 6 || r.H < 2 {
 		return
 	}
 	p := w.panes[id]
-	style, stroke := thFrame, "─"
+	dead := p != nil && p.isDead()
+	style, stroke := w.th.frame, "─"
 	if focused {
-		style = thFocus
+		style = w.th.focus
 	}
-	if p != nil && p.isDead() {
-		style = thDead
+	if dead {
+		style = w.th.dead
 	}
 	if w.hover.bars[id] {
-		style, stroke = thHover, "━" // the boundary under the pointer
+		style, stroke = w.th.hover, "━" // the boundary under the pointer
 	}
 	// Flanking junctions live in the neighboring border/ring columns. Their
 	// glyph depends on whether the vertical line continues ABOVE this row: a
@@ -377,22 +366,41 @@ func (w *ws) renderPaneBarLocked(b *bytes.Buffer, id string, r layout.Rect, focu
 	if title == "" {
 		title = "shell"
 	}
-	if p != nil && p.isDead() {
-		title += " (exited)"
+	// Buttons drop before the bar does (the bar is also the focus handle,
+	// and a row that overflows corrupts the flanking junction): [+] needs a
+	// 1-cell title beside both buttons, [≡] a 1-cell title beside itself.
+	const menu, split = "[≡]", "[+]"
+	hasSplit := r.W-4-6 >= 1 // stroke+" "+title+" "+fill+[+][≡]+stroke
+	hasMenu := hasSplit || r.W-4-3 >= 1
+	btns := ""
+	if hasSplit {
+		btns = split + menu
+	} else if hasMenu {
+		btns = menu
 	}
-	const menu = "[≡]"
-	maxTitle := r.W - 4 - runewidth.StringWidth(menu) // stroke + " " + title + " " + fill + menu + stroke
+	maxTitle := r.W - 4 - runewidth.StringWidth(btns)
+	if dead {
+		// The bar is the restart affordance; say so when there is room —
+		// hidden behind a click is fine, hidden behind knowledge is not.
+		title += " (exited)"
+		if hint := title + " — click to restart"; runewidth.StringWidth(hint) <= maxTitle {
+			title = hint
+		}
+	}
 	title = runewidth.Truncate(title, max(maxTitle, 1), "…")
 	tw := runewidth.StringWidth(title)
-	fill := r.W - 4 - tw - runewidth.StringWidth(menu)
-	fmt.Fprintf(b, "%s %s %s%s%s", stroke, title, strings.Repeat(stroke, max(fill, 0)), menu, stroke)
+	fill := maxTitle - tw
+	fmt.Fprintf(b, "%s %s %s%s%s", stroke, title, strings.Repeat(stroke, max(fill, 0)), btns, stroke)
 	b.WriteString(right + sgrReset)
 
 	bd, hasBorder := barBorder[[2]int{r.X, r.Y}]
-	w.hits = append(w.hits,
-		hitRegion{rect: layout.Rect{X: r.X, Y: r.Y, W: r.W, H: 1}, kind: hitPaneBar, pane: id, border: bd, hasBorder: hasBorder},
-		hitRegion{rect: layout.Rect{X: r.X + r.W - 4, Y: r.Y, W: 4, H: 1}, kind: hitPaneMenu, pane: id},
-	)
+	w.hits = append(w.hits, hitRegion{rect: layout.Rect{X: r.X, Y: r.Y, W: r.W, H: 1}, kind: hitPaneBar, pane: id, border: bd, hasBorder: hasBorder})
+	if hasMenu {
+		w.hits = append(w.hits, hitRegion{rect: layout.Rect{X: r.X + r.W - 4, Y: r.Y, W: 4, H: 1}, kind: hitPaneMenu, pane: id})
+	}
+	if hasSplit {
+		w.hits = append(w.hits, hitRegion{rect: layout.Rect{X: r.X + r.W - 7, Y: r.Y, W: 3, H: 1}, kind: hitPaneSplit, pane: id})
+	}
 }
 
 // barJunction picks the box-drawing glyph for a pane bar's flanking column.
@@ -447,7 +455,7 @@ func (w *ws) renderHoverLocked(b *bytes.Buffer) {
 	if len(w.hover.strips) == 0 {
 		return
 	}
-	b.WriteString(thHover)
+	b.WriteString(w.th.hover)
 	for _, s := range w.hover.strips {
 		if s.W == 1 {
 			for y := 0; y < s.H; y++ {
@@ -505,62 +513,84 @@ func (w *ws) renderPaneContentLocked(b *bytes.Buffer, id string, r layout.Rect) 
 		tag := fmt.Sprintf(" +%d ", s)
 		if tw := runewidth.StringWidth(tag); tw <= r.W {
 			cup(b, r.Y, r.X+r.W-tw)
-			b.WriteString(thAccentBar + tag + sgrReset)
+			b.WriteString(w.th.accentBar + tag + sgrReset)
 		}
 	}
 }
 
-// renderOverlayLocked draws the popup and records its hit regions last, so
-// it owns every cell it covers.
-func (w *ws) renderOverlayLocked(b *bytes.Buffer) {
-	o := w.overlay
-	wd := runewidth.StringWidth(o.title)
+// overlaySize returns the popup's outer dimensions; placement (the anchor
+// math in the router's open* helpers) and rendering must agree on them.
+func (w *ws) overlaySize(o *overlay) (wd, ht int) {
+	wd = runewidth.StringWidth(o.title)
 	for _, it := range o.items {
 		if l := runewidth.StringWidth(it.label); l > wd {
 			wd = l
 		}
 	}
-	wd += 4                      // "│ " + " │"
-	wd = clampInt(wd, 6, w.cols) // pad() truncates content to fit
-	ht := len(o.items) + 2
+	wd += 2                       // one space of padding each side
+	wd = clampInt(wd, 14, w.cols) // pad() truncates content to fit
+	ht = len(o.items)
 	if o.title != "" {
-		ht++
+		ht += 2 // title + its rule
 	}
-	ht = clampInt(ht, 3, w.rows-1)
+	ht = clampInt(ht, 1, w.rows-1)
+	return wd, ht
+}
+
+// overlayHeadRows is the row count above the first item (title + rule).
+func overlayHeadRows(o *overlay) int {
+	if o.title != "" {
+		return 2
+	}
+	return 0
+}
+
+// renderOverlayLocked draws the popup — a borderless card: the surface
+// background IS the boundary (no box drawing). Rows are title, a dim rule,
+// then items (separators are dim rules too). It records its hit regions
+// last, so it owns every cell it covers.
+func (w *ws) renderOverlayLocked(b *bytes.Buffer) {
+	o := w.overlay
+	wd, ht := w.overlaySize(o)
 	x := clampInt(o.x, 0, w.cols-wd)
 	y := clampInt(o.y, 1, w.rows-ht)
+	rule := strings.Repeat("─", wd-2)
 
 	row := y
-	cup(b, row, x)
-	b.WriteString(thMenu + "╭" + strings.Repeat("─", wd-2) + "╮")
-	row++
 	if o.title != "" {
 		cup(b, row, x)
-		b.WriteString(thMenuDim)
-		fmt.Fprintf(b, "│ %s │", pad(o.title, wd-4))
-		b.WriteString(thMenu)
+		b.WriteString(w.th.menuTitle + " " + pad(o.title, wd-2) + " ")
+		row++
+		cup(b, row, x)
+		b.WriteString(w.th.menuDim + " " + rule + " ")
 		row++
 	}
 	itemsStart := len(w.hits)
 	for i, it := range o.items {
-		if row >= y+ht-1 || row >= w.rows-1 {
+		if row >= y+ht || row >= w.rows {
 			break // clipped by a tiny screen; unreachable items stay unclickable
 		}
 		cup(b, row, x)
-		style := thMenu
-		if !it.enabled {
-			style = thMenuDim
+		text := it.label
+		style := w.th.menu
+		switch {
+		case it.separator:
+			style, text = w.th.menuDim, rule
+		case !it.enabled:
+			style = w.th.menuDim
+		case it.danger:
+			style = w.th.menuDanger
 		}
-		if i == w.hover.menuItem && it.enabled && strings.HasPrefix(w.hover.key, "mi:") {
-			style = thMenuHover
+		if i == o.sel && it.enabled && !it.separator {
+			style = w.th.menuHover
 		}
-		b.WriteString(style)
-		fmt.Fprintf(b, "│ %s │", pad(it.label, wd-4))
-		w.hits = append(w.hits, hitRegion{rect: layout.Rect{X: x, Y: row, W: wd, H: 1}, kind: hitMenuItem, item: i})
+		b.WriteString(style + " " + pad(text, wd-2) + " ")
+		if !it.separator {
+			w.hits = append(w.hits, hitRegion{rect: layout.Rect{X: x, Y: row, W: wd, H: 1}, kind: hitMenuItem, item: i})
+		}
 		row++
 	}
-	cup(b, clampInt(row, 1, w.rows-1), x)
-	b.WriteString(thMenu + "╰" + strings.Repeat("─", wd-2) + "╯" + sgrReset)
+	b.WriteString(sgrReset)
 	// The body region must sit BELOW the item regions in z-order (the
 	// hitmap scans backwards): splice it in before them.
 	body := hitRegion{rect: layout.Rect{X: x, Y: y, W: wd, H: ht}, kind: hitOverlayBody}
