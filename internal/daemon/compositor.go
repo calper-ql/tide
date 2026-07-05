@@ -8,6 +8,7 @@ package daemon
 import (
 	"bytes"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -124,7 +125,21 @@ func (w *ws) renderLocked() []byte {
 			}
 		}
 		focused := w.lay.FocusedPane()
-		for id, r := range w.rects {
+		// Deterministic order, focused pane last: two bars sharing a junction
+		// cell stamp the same glyph, so the only writer-order question is the
+		// color — and the focused pane's accent should win its perimeter.
+		ids := make([]string, 0, len(w.rects))
+		for id := range w.rects {
+			ids = append(ids, id)
+		}
+		sort.Slice(ids, func(i, j int) bool {
+			if (ids[i] == focused) != (ids[j] == focused) {
+				return ids[j] == focused
+			}
+			return ids[i] < ids[j]
+		})
+		for _, id := range ids {
+			r := w.rects[id]
 			c := contentRect(r)
 			w.hits = append(w.hits, hitRegion{rect: c, kind: hitPane, pane: id})
 			w.renderPaneBarLocked(&b, id, r, id == focused, barBorder)
@@ -334,12 +349,12 @@ func (w *ws) renderFrameLocked(b *bytes.Buffer) {
 // divider carries that border so the router can drag it. On narrow panes
 // [+] drops before the bar does: the bar is also the focus handle.
 func (w *ws) renderPaneBarLocked(b *bytes.Buffer, id string, r layout.Rect, focused bool, barBorder map[[2]int]layout.Border) {
-	if r.W < 6 || r.H < 2 {
+	if !barRendered(r) {
 		return
 	}
 	p := w.panes[id]
 	dead := p != nil && p.isDead()
-	style, stroke := w.th.frame, "─"
+	style, stroke, sw := w.th.frame, "─", armLight
 	if focused {
 		style = w.th.focus
 	}
@@ -347,15 +362,16 @@ func (w *ws) renderPaneBarLocked(b *bytes.Buffer, id string, r layout.Rect, focu
 		style = w.th.dead
 	}
 	if w.hover.bars[id] {
-		style, stroke = w.th.hover, "━" // the boundary under the pointer
+		style, stroke, sw = w.th.hover, "━", armHeavy // the boundary under the pointer
 	}
-	// Flanking junctions live in the neighboring border/ring columns. Their
-	// glyph depends on whether the vertical line continues ABOVE this row: a
-	// bar whose border only drops downward (e.g. a full-width pane was split
-	// in above it) gets a ┬, not a ├/┤ that would poke up into the pane above.
+	// Flanking junctions live in the neighboring border/ring columns; every
+	// arm is resolved from what is really drawn there — the vertical line
+	// above (if any), the bar itself, and a neighboring bar only if one
+	// actually occupies the adjacent cell — so a junction never grows an arm
+	// poking into a pane that has no line on that side.
 	leftCol, rightCol := r.X-1, r.X+r.W
-	left := barJunction(w.lineAboveLocked(leftCol, r.Y), leftCol != 0, true)
-	right := barJunction(w.lineAboveLocked(rightCol, r.Y), true, rightCol != w.cols-1)
+	left := w.flankJunctionLocked(leftCol, r.Y)
+	right := w.flankJunctionLocked(rightCol, r.Y)
 	cup(b, r.Y, r.X-1)
 	b.WriteString(style + left)
 
@@ -390,7 +406,16 @@ func (w *ws) renderPaneBarLocked(b *bytes.Buffer, id string, r layout.Rect, focu
 	title = runewidth.Truncate(title, max(maxTitle, 1), "…")
 	tw := runewidth.StringWidth(title)
 	fill := maxTitle - tw
-	fmt.Fprintf(b, "%s %s %s%s%s", stroke, title, strings.Repeat(stroke, max(fill, 0)), btns, stroke)
+	// Stroke cells lift to ┴-form junctions where a vertical border from the
+	// region above dead-ends into this bar (text and button cells win — a
+	// junction never eats the title).
+	var fillRun strings.Builder
+	for i := range max(fill, 0) {
+		fillRun.WriteString(w.barStrokeLocked(r.X+3+tw+i, r.Y, sw, stroke))
+	}
+	fmt.Fprintf(b, "%s %s %s%s%s",
+		w.barStrokeLocked(r.X, r.Y, sw, stroke), title, fillRun.String(), btns,
+		w.barStrokeLocked(r.X+r.W-1, r.Y, sw, stroke))
 	b.WriteString(right + sgrReset)
 
 	bd, hasBorder := barBorder[[2]int{r.X, r.Y}]
@@ -403,28 +428,49 @@ func (w *ws) renderPaneBarLocked(b *bytes.Buffer, id string, r layout.Rect, focu
 	}
 }
 
-// barJunction picks the box-drawing glyph for a pane bar's flanking column.
-// A bar always continues downward (the border/ring below it), so the choice
-// turns on up (a vertical line also above) and left/right (the bar extends
-// to each side): e.g. up&left&right → ┼, !up&left&right → ┬ (a border that
-// only drops below, the top of an L|R split with a full-width pane above).
-func barJunction(up, left, right bool) string {
-	switch {
-	case up && left && right:
-		return "┼"
-	case up && right: // up && !left
-		return "├"
-	case up && left: // up && !right
-		return "┤"
-	case left && right: // !up
-		return "┬"
-	case right: // !up && !left
-		return "╭"
-	case left: // !up && !right
-		return "╮"
-	default:
-		return "┬"
+// flankJunctionLocked resolves the junction cell in the border/ring column
+// flanking a pane bar. Down is always a line (the border or ring the bar's
+// pane rests against continues below its own top row); up only where a
+// vertical line really runs in the cell above; the horizontal arms only
+// where a rendered bar's body actually reaches the adjacent cell. Two bars
+// sharing a junction cell thus stamp the same glyph regardless of order.
+func (w *ws) flankJunctionLocked(x, y int) string {
+	up := armNone
+	if w.lineAboveLocked(x, y) {
+		up = armLight
 	}
+	return boxGlyph(up, armLight, w.barArmLocked(x-1, y), w.barArmLocked(x+1, y))
+}
+
+// barRendered reports whether a pane draws its bar at all: enough width
+// for the flanking junctions plus a stub, and a row to spare for content.
+func barRendered(r layout.Rect) bool {
+	return r.W >= 6 && r.H >= 2
+}
+
+// barArmLocked reports the weight of the horizontal line a pane bar's body
+// contributes to cell (x, y): heavy while that bar is hovered, none where
+// no bar is rendered (a pane too small for a bar draws no line at all).
+func (w *ws) barArmLocked(x, y int) int {
+	for id, r := range w.rects {
+		if r.Y == y && barRendered(r) && x >= r.X && x < r.X+r.W {
+			if w.hover.bars[id] {
+				return armHeavy
+			}
+			return armLight
+		}
+	}
+	return armNone
+}
+
+// barStrokeLocked draws one stroke cell of a bar, lifting it to a ┴-form
+// junction where a vertical border from the region above dead-ends into
+// this row instead of leaving the │ hanging over a flat stroke.
+func (w *ws) barStrokeLocked(x, y, sw int, stroke string) string {
+	if w.lineAboveLocked(x, y) {
+		return boxGlyph(armLight, armNone, sw, sw)
+	}
+	return stroke
 }
 
 // lineAboveLocked reports whether a vertical frame line occupies the cell
@@ -450,7 +496,10 @@ func (w *ws) lineAboveLocked(col, y int) bool {
 // renderHoverLocked overdraws the hovered boundary strips with heavy
 // bright strokes (bars highlight via their own style; this covers vertical
 // borders and ring segments). Corner hovers carry several strips — the
-// preview of what a corner gesture affects.
+// preview of what a corner gesture affects. Cells where lighter lines meet
+// the strip keep their junctions as mixed-weight glyphs (┠ ┷ ┕ …) instead
+// of being flattened to a bare stroke, and the strip's end cells taper
+// into whatever the line continues as beyond them.
 func (w *ws) renderHoverLocked(b *bytes.Buffer) {
 	if len(w.hover.strips) == 0 {
 		return
@@ -458,13 +507,49 @@ func (w *ws) renderHoverLocked(b *bytes.Buffer) {
 	b.WriteString(w.th.hover)
 	for _, s := range w.hover.strips {
 		if s.W == 1 {
-			for y := 0; y < s.H; y++ {
-				cup(b, s.Y+y, s.X)
-				b.WriteString("┃")
+			for y := s.Y; y < s.Y+s.H; y++ {
+				up, down := armHeavy, armHeavy
+				if y == s.Y {
+					up = armNone
+					if w.lineAboveLocked(s.X, y) {
+						up = armLight
+					}
+				}
+				if y == s.Y+s.H-1 {
+					// Below the strip's last cell sits either the bottom ring
+					// or a wider bar this border tees into — both light.
+					down = armNone
+					if y+1 == w.rows-1 || w.barArmLocked(s.X, y+1) != armNone {
+						down = armLight
+					}
+				}
+				cup(b, y, s.X)
+				b.WriteString(boxGlyph(up, down, w.barArmLocked(s.X-1, y), w.barArmLocked(s.X+1, y)))
 			}
 		} else {
+			// Horizontal strips live on the bottom ring row: the run continues
+			// light past the strip's ends, up-arms mark border ┴s and corners.
 			cup(b, s.Y, s.X)
-			b.WriteString(strings.Repeat("━", s.W))
+			for x := s.X; x < s.X+s.W; x++ {
+				left, right := armHeavy, armHeavy
+				if x == s.X {
+					left = armNone
+					if x > 0 {
+						left = armLight
+					}
+				}
+				if x == s.X+s.W-1 {
+					right = armNone
+					if x < w.cols-1 {
+						right = armLight
+					}
+				}
+				up := armNone
+				if w.lineAboveLocked(x, s.Y) {
+					up = armLight
+				}
+				b.WriteString(boxGlyph(up, armNone, left, right))
+			}
 		}
 	}
 	b.WriteString(sgrReset)

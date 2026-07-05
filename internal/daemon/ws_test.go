@@ -682,23 +682,111 @@ func TestEdgeMenuSplitsOneWindow(t *testing.T) {
 	})
 }
 
-func TestBarJunctionGlyph(t *testing.T) {
+func TestBoxGlyphResolvesArms(t *testing.T) {
 	cases := []struct {
-		up, left, right bool
-		want            string
+		up, down, left, right int
+		want                  string
 	}{
-		{false, true, true, "┬"},  // border drops below only (full-width pane above a split)
-		{true, true, true, "┼"},   // continuous cross
-		{true, false, true, "├"},  // left ring at a divider row
-		{true, true, false, "┤"},  // right ring at a divider row
-		{false, false, true, "╭"}, // top-left corner
-		{false, true, false, "╮"}, // top-right corner
+		{armNone, armLight, armLight, armLight, "┬"},  // border drops below only
+		{armLight, armLight, armLight, armLight, "┼"}, // continuous cross
+		{armLight, armLight, armNone, armLight, "├"},  // left ring at a divider row
+		{armLight, armLight, armLight, armNone, "┤"},  // right ring at a divider row
+		{armNone, armLight, armNone, armLight, "╭"},   // top-left corner (rounded)
+		{armNone, armLight, armLight, armNone, "╮"},   // top-right corner (rounded)
+		{armLight, armNone, armLight, armLight, "┴"},  // border dead-ending into a bar
+		{armLight, armNone, armHeavy, armHeavy, "┷"},  // …into a HOVERED bar
+		{armHeavy, armHeavy, armNone, armNone, "┃"},   // hovered border, plain run
+		{armHeavy, armHeavy, armLight, armNone, "┨"},  // hovered border, bar tees in left
+		{armHeavy, armHeavy, armNone, armLight, "┠"},  // hovered border, bar tees in right
+		{armHeavy, armHeavy, armLight, armLight, "╂"}, // hovered border, bars both sides
+		{armLight, armNone, armHeavy, armHeavy, "┷"},  // hovered bottom ring over a ┴
+		{armLight, armNone, armNone, armHeavy, "┕"},   // hovered bottom ring, left corner
+		{armLight, armNone, armHeavy, armNone, "┙"},   // hovered bottom ring, right corner
+		{armNone, armNone, armLight, armHeavy, "╼"},   // strip end tapering into the light run
+		{armHeavy, armLight, armNone, armNone, "╿"},   // hovered border tapering into the ring ┴
+		{armNone, armNone, armNone, armNone, " "},     // no arms at all
 	}
 	for _, c := range cases {
-		if g := barJunction(c.up, c.left, c.right); g != c.want {
-			t.Errorf("barJunction(up=%v,left=%v,right=%v) = %q, want %q", c.up, c.left, c.right, g, c.want)
+		if g := boxGlyph(c.up, c.down, c.left, c.right); g != c.want {
+			t.Errorf("boxGlyph(%d,%d,%d,%d) = %q, want %q", c.up, c.down, c.left, c.right, g, c.want)
 		}
 	}
+	for i, g := range boxGlyphs {
+		if g == "" {
+			t.Errorf("boxGlyphs[%d] is empty — every arm combination must resolve", i)
+		}
+	}
+}
+
+// TestMisalignedBarJunctionHasNoPhantomArm pins the phantom-arm fix: with the
+// left column stacked (upper/lower) beside one tall right pane, the lower-left
+// bar's junction into the shared border must be a ┤ — the old code assumed a
+// line continued to the right of any interior column and stamped a ┼ whose
+// right arm poked into the right pane's row.
+func TestMisalignedBarJunctionHasNoPhantomArm(t *testing.T) {
+	w, _, s := newTestWS(t)
+	s.waitFor(t, "first frame", func() bool { return s.contains("1:") })
+	withWS(w, func() {
+		left := w.lay.FocusedPane()
+		w.actionSplitLocked(left, layout.SplitRight) // L | R (focus moves to R)
+		w.actionSplitLocked(left, layout.SplitDown)  // stack the left column
+	})
+	s.waitFor(t, "three panes", func() bool {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		return w.lay.CountPanes() == 3
+	})
+	withWS(w, func() {
+		w.allDirty = true
+		frame := string(w.renderLocked())
+		if strings.Contains(frame, "┼") {
+			t.Fatal("frame contains a ┼ — a junction grew an arm into a pane with no line there")
+		}
+		if !strings.Contains(frame, "┤") {
+			t.Fatal("frame has no ┤ — the lower-left bar should tee into the shared border")
+		}
+	})
+}
+
+// TestBorderDeadEndIntoWiderBarGetsTee pins the mid-span junction: a vertical
+// border between two top panes that ends at a full-width pane's bar below
+// must land on a ┴ in that bar, not hang over a flat ─.
+func TestBorderDeadEndIntoWiderBarGetsTee(t *testing.T) {
+	w, _, s := newTestWS(t)
+	s.waitFor(t, "first frame", func() bool { return s.contains("1:") })
+	withWS(w, func() {
+		top := w.lay.FocusedPane()
+		w.actionSplitLocked(top, layout.SplitDown)  // top / bottom (full width)
+		w.actionSplitLocked(top, layout.SplitRight) // top becomes A | B
+	})
+	s.waitFor(t, "three panes", func() bool {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		return w.lay.CountPanes() == 3
+	})
+	withWS(w, func() {
+		var vb *layout.Border
+		for i := range w.borders {
+			if w.borders[i].Vertical {
+				vb = &w.borders[i]
+			}
+		}
+		if vb == nil {
+			t.Fatal("no vertical border between the top panes")
+		}
+		barRow := vb.Rect.Y + vb.Rect.H
+		if barRow >= w.rows-1 {
+			t.Fatalf("border reaches the bottom ring (ends at %d) — layout does not exercise the mid-span case", barRow)
+		}
+		if !w.lineAboveLocked(vb.Rect.X, barRow) {
+			t.Fatal("no line above the bar row at the border column — test premise broken")
+		}
+		w.allDirty = true
+		frame := string(w.renderLocked())
+		if !strings.Contains(frame, "┴") {
+			t.Fatal("frame has no ┴ — the border dead-ends into the full-width bar over a flat ─")
+		}
+	})
 }
 
 // TestSplitAboveLeavesTeeNotCross pins the junction fix: after dropping a
