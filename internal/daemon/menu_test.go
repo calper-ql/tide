@@ -81,10 +81,11 @@ func TestMenuDisabledItemsVisibleWithReasons(t *testing.T) {
 	if s.contains("\x1b[0;100;90m") {
 		t.Fatal("menu still uses fg and bg from palette slot 8 (invisible rows)")
 	}
-	s.waitFor(t, "readable dim style", func() bool { return s.contains("\x1b[0;100;37m") })
+	// Tide's disabled rows: slot-8 glyphs swapped onto the cyan card fill.
+	s.waitFor(t, "readable dim style", func() bool { return s.contains("\x1b[0;7;36;100m") })
 	// Borderless: no box-drawing gutters on the menu surface (the ╭╰ that
 	// remain on screen belong to the pane frame, not the popup).
-	if s.contains("│ Copy") || s.contains("\x1b[0;100;97m╭") {
+	if s.contains("│ Copy") || s.contains("\x1b[0;7;36m╭") {
 		t.Fatal("menu still renders a box-drawing border")
 	}
 }
@@ -414,7 +415,7 @@ func TestThemePickerAppliesPersistsAndSticks(t *testing.T) {
 	s.waitFor(t, "theme picker", func() bool { return s.contains("● Tide") && s.contains("○ Ocean") })
 
 	menuClick(t, w, conn, "○ Ocean")
-	s.waitFor(t, "ocean accent live on the wire", func() bool { return s.contains("\x1b[0;7;1;34m") })
+	s.waitFor(t, "ocean card live on the wire", func() bool { return s.contains("\x1b[0;7;34;107m") })
 	s.waitFor(t, "picker re-opened with the new mark", func() bool { return s.contains("● Ocean") })
 	withWS(w, func() {
 		if w.overlay == nil || w.overlay.title != "Theme" {
@@ -436,10 +437,11 @@ func TestThemePickerAppliesPersistsAndSticks(t *testing.T) {
 	}
 	waitPrefs("ocean")
 
-	// Cycle on to Ink: the reverse-video fallback renders (its card is
-	// pure reverse, title bold-reverse) and persists like any preset.
+	// Cycle on to Ink: the reverse-video fallback renders (its card is pure
+	// reverse — the bare 0;7 no chromatic preset emits) and persists like
+	// any preset.
 	menuClick(t, w, conn, "○ Ink")
-	s.waitFor(t, "ink card live on the wire", func() bool { return s.contains("\x1b[0;7;1m Theme") })
+	s.waitFor(t, "ink card live on the wire", func() bool { return s.contains("\x1b[0;7m ○ ") })
 	s.waitFor(t, "picker marks Ink", func() bool { return s.contains("● Ink") })
 	waitPrefs("ink")
 
