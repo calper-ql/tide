@@ -190,7 +190,11 @@ func (p *pane) inputLoop() {
 // TERM pinned to what the pane VT actually emulates and TIDE_SESSION
 // injected (spec: capability model).
 func paneEnv(id, socket string) []string {
-	drop := []string{"TIDE_SESSION=", "TMUX=", "STY=", "TERM=", "TERM_PROGRAM=", "TERM_PROGRAM_VERSION="}
+	// LINES/COLUMNS describe the FIRST client's terminal, not this pane;
+	// ncurses prefers them over TIOCGWINSZ, so a leaked pair makes an app
+	// lay out for a size the pane does not have until its first SIGWINCH.
+	drop := []string{"TIDE_SESSION=", "TMUX=", "STY=", "TERM=", "TERM_PROGRAM=", "TERM_PROGRAM_VERSION=",
+		"LINES=", "COLUMNS="}
 	env := make([]string, 0, len(os.Environ())+2)
 	for _, kv := range os.Environ() {
 		skip := false

@@ -342,3 +342,16 @@ func TestRestoredPaneDropsStaleInputModes(t *testing.T) {
 	}
 	collectRender(t, b, nil, "\x1b]52;p;")
 }
+
+func TestPaneEnvDropsClientTerminalGeometry(t *testing.T) {
+	// LINES/COLUMNS in the daemon's environment describe the FIRST client's
+	// terminal; ncurses prefers them over TIOCGWINSZ, so a leaked pair makes
+	// an app lay out for a size the pane does not have.
+	t.Setenv("LINES", "97")
+	t.Setenv("COLUMNS", "417")
+	for _, kv := range paneEnv("id", "/tmp/sock") {
+		if strings.HasPrefix(kv, "LINES=") || strings.HasPrefix(kv, "COLUMNS=") {
+			t.Fatalf("pane env leaks client terminal geometry: %s", kv)
+		}
+	}
+}

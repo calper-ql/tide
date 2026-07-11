@@ -116,6 +116,9 @@ type State struct {
 
 	// tide: last printed graphic rune, for REP (CSI b).
 	lastChar rune
+	// tide: a 1049 alt-screen entry has saved the cursor at least once, so
+	// a (possibly unpaired) 1049 exit may restore it (see setMode).
+	altSaved bool
 	// tide: DECSCUSR cursor style (CSI Ps SP q). 0 or 1 = blinking block
 	// (default); 2 steady block, 3/4 underline, 5/6 bar.
 	cursorShape int
@@ -131,10 +134,14 @@ type State struct {
 	modifyOtherKeys int
 
 	// tide: fixed-capacity ring of lines scrolled off the top of the main
-	// screen; see scrollback.go.
+	// screen; see scrollback.go. histScrolled counts lines scrolled into
+	// history since the last full clear — the resize pull budget (tmux's
+	// hscrolled): growth re-exposes only content that actually scrolled
+	// away, never scrollback from before an ED 2.
 	history      []line
 	historyStart int
 	historyCount int
+	histScrolled int
 
 	// tide: bytes of the in-flight (incomplete) escape sequence, so a
 	// snapshot taken mid-sequence can hand them to the continuation stream.
@@ -404,13 +411,25 @@ func (t *State) reset() {
 	t.kittyFlags = 0
 	t.kittyStack = nil
 	t.modifyOtherKeys = 0
+	t.histScrolled = 0
+	t.altSaved = false
 	// tide: clear the WHOLE screen — upstream transposed the args
 	// (rows-1,cols-1), wiping only a square corner.
 	t.clearAll()
 	t.moveTo(0, 0)
 }
 
-// TODO: definitely can improve allocs
+// resize reshapes both grids to cols x rows, matching tmux (verified
+// head-to-head): each grid slides up just enough to keep ITS OWN cursor
+// visible — the live cursor for the active grid, the 1049-saved cursor for
+// a main grid parked behind an alt screen. The main grid's slid-away top
+// rows leave through the history ring like scrolled lines; rows cut off
+// below the cursor are dropped (pushing them would put below-cursor content
+// ABOVE the screen in scrollback order). Growth pulls main-grid rows back
+// out of history — but only past the blank slack under the content, so a
+// shrink+grow cycle round-trips while a just-cleared screen stays
+// top-anchored. The alt grid has no history: it neither pushes nor pulls.
+// TODO: definitely can improve allocs (rows-only changes realloc both grids).
 func (t *State) resize(cols, rows int) bool {
 	if cols == t.cols && rows == t.rows {
 		return false
@@ -418,79 +437,121 @@ func (t *State) resize(cols, rows int) bool {
 	if cols < 1 || rows < 1 {
 		return false
 	}
-	slide := t.cur.Y - rows + 1
-	// tide: rows a shrink discards leave through the history ring like
-	// scrolled lines, instead of vanishing (main screen, non-blank only).
-	mainGrid := t.lines
-	if t.mode&ModeAltScreen != 0 {
-		mainGrid = t.altLines
-	}
-	pushRange := func(from, to int) {
-		for i := max(from, 0); i < to && i < t.rows; i++ {
-			if !blankLine(mainGrid[i]) {
-				t.pushHistory(mainGrid[i])
-			}
-		}
-	}
-	if slide > 0 {
-		pushRange(0, slide)
-		pushRange(slide+rows, t.rows)
-	} else if rows < t.rows {
-		pushRange(rows, t.rows)
-	}
-	if slide > 0 {
-		copy(t.lines, t.lines[slide:slide+rows])
-		copy(t.altLines, t.altLines[slide:slide+rows])
+	alt := t.mode&ModeAltScreen != 0
+	oldRows, oldCols := t.rows, t.cols
+	mincols := min(cols, oldCols)
+	oldMain, oldAlt := t.lines, t.altLines
+	mainY, altY := t.cur.Y, t.cur.Y
+	if alt {
+		oldMain, oldAlt = t.altLines, t.lines
+		mainY = t.curSaved.Y
 	}
 
-	lines, altLines, tabs := t.lines, t.altLines, t.tabs
-	t.lines = make([]line, rows)
-	t.altLines = make([]line, rows)
-	t.dirty = make([]bool, rows)
-	t.tabs = make([]bool, cols)
-
-	minrows := min(rows, t.rows)
-	mincols := min(cols, t.cols)
-	t.changed |= ChangedScreen
-	for i := 0; i < rows; i++ {
-		t.dirty[i] = true
-		t.lines[i] = make(line, cols)
-		t.altLines[i] = make(line, cols)
+	mainSlide := max(mainY-rows+1, 0)
+	altSlide := max(altY-rows+1, 0)
+	for i := 0; i < mainSlide; i++ {
+		t.pushHistory(oldMain[i])
 	}
-	for i := 0; i < minrows; i++ {
-		copy(t.lines[i], lines[i])
-		copy(t.altLines[i], altLines[i])
-	}
-	copy(t.tabs, tabs)
-	if cols > t.cols {
-		i := t.cols - 1
-		for i > 0 && !tabs[i] {
-			i--
-		}
-		for i += tabspaces; i < len(tabs); i += tabspaces {
-			tabs[i] = true
-		}
+	// Growth pulls back at most the lines that have SCROLLED into history
+	// since the last full clear (tmux's hscrolled): a screen that filled by
+	// scrolling stays glued to its bottom, a just-cleared one stays at the
+	// top instead of having old scrollback shoved back over the prompt.
+	pull := 0
+	if rows > oldRows {
+		pull = clamp(rows-oldRows, 0, min(t.histScrolled, t.historyCount))
 	}
 
 	t.cols = cols
 	t.rows = rows
-	// tide: column truncation can cut double-width pairs at the new edge.
-	for i := 0; i < rows; i++ {
-		t.normalizeWideRow(t.lines[i])
-		t.normalizeWideRow(t.altLines[i])
+	t.changed |= ChangedScreen
+	t.dirty = make([]bool, rows)
+	for y := range t.dirty {
+		t.dirty[y] = true
+	}
+	newMain := t.reshapeGrid(oldMain, oldRows, mincols, mainSlide, pull)
+	for k := 0; k < pull; k++ {
+		h := t.historyLine(t.historyCount - pull + k)
+		n := copy(newMain[k], h)
+		t.eraseCells(newMain[k], n, cols)
+	}
+	t.popHistory(pull)
+	t.histScrolled -= pull
+	newAlt := t.reshapeGrid(oldAlt, oldRows, mincols, altSlide, 0)
+	if alt {
+		t.lines, t.altLines = newAlt, newMain
+	} else {
+		t.lines, t.altLines = newMain, newAlt
+	}
+
+	oldTabs := t.tabs
+	t.tabs = make([]bool, cols)
+	copy(t.tabs, oldTabs)
+	if cols > len(oldTabs) {
+		i := len(oldTabs) - 1
+		for i > 0 && !oldTabs[i] {
+			i--
+		}
+		for i += tabspaces; i < cols; i += tabspaces {
+			t.tabs[i] = true
+		}
+	}
+
+	// tide: only column truncation and pulled rows (checkpointed at another
+	// width) can cut a double-width pair at the new edge.
+	if cols < oldCols || pull > 0 {
+		for i := 0; i < rows; i++ {
+			t.normalizeWideRow(t.lines[i])
+			t.normalizeWideRow(t.altLines[i])
+		}
 	}
 	t.setScroll(0, rows-1)
-	t.moveTo(t.cur.X, t.cur.Y)
-	for i := 0; i < 2; i++ {
-		if mincols < cols && minrows > 0 {
-			t.clear(mincols, 0, cols-1, minrows-1)
-		}
-		if cols > 0 && minrows < rows {
-			t.clear(0, minrows, cols-1, rows-1)
-		}
-		t.swapScreen()
+	// Each cursor rides its own grid's transform, so DECRC / 1049l restore
+	// land on the same text.
+	t.curSaved.Y = clamp(t.curSaved.Y-mainSlide+pull, 0, rows-1)
+	if alt {
+		t.moveTo(t.cur.X, t.cur.Y-altSlide)
+	} else {
+		t.moveTo(t.cur.X, t.cur.Y-mainSlide+pull)
 	}
-	return slide > 0
+	return mainSlide > 0 || altSlide > 0
+}
+
+// reshapeGrid builds the rows x t.cols version of a grid: old rows starting
+// at slide land shifted down by shift, and only the exposed cells — pulled
+// rows (filled by the caller), widened column tails, the bottom remainder —
+// are erased. t.rows/t.cols already hold the new size.
+func (t *State) reshapeGrid(old []line, oldRows, mincols, slide, shift int) []line {
+	g := make([]line, t.rows)
+	for y := range g {
+		g[y] = make(line, t.cols)
+	}
+	kept := min(oldRows-slide, t.rows-shift)
+	for i := 0; i < kept; i++ {
+		row := g[shift+i]
+		copy(row[:mincols], old[slide+i][:mincols])
+		t.eraseCells(row, mincols, t.cols)
+	}
+	for y := 0; y < shift; y++ {
+		t.eraseCells(g[y], 0, t.cols)
+	}
+	for y := shift + kept; y < t.rows; y++ {
+		t.eraseCells(g[y], 0, t.cols)
+	}
+	return g
+}
+
+// eraseCells blanks l[x0:x1] — the one erase rule for clears and
+// resize-exposed cells alike. Erase is background-color-erase: the cell
+// keeps the pen's fg/bg but drops every other rendition (underline, bold,
+// ...). Carrying underline here is what painted a continuous underscore
+// across blank space under apps that set underline then erase to end of
+// line (lazygit). Matches st (gp->mode = 0).
+func (t *State) eraseCells(l line, x0, x1 int) {
+	for x := x0; x < x1; x++ {
+		l[x] = t.cur.Attr
+		l[x].Char = ' '
+		l[x].Mode = 0
+	}
 }
 
 func (t *State) clear(x0, y0, x1, y1 int) {
@@ -507,16 +568,7 @@ func (t *State) clear(x0, y0, x1, y1 int) {
 	t.changed |= ChangedScreen
 	for y := y0; y <= y1; y++ {
 		t.dirty[y] = true
-		for x := x0; x <= x1; x++ {
-			t.lines[y][x] = t.cur.Attr
-			t.lines[y][x].Char = ' '
-			// tide: erase is background-color-erase — the cleared cell keeps
-			// the pen's fg/bg but drops every other rendition (underline,
-			// bold, ...). Carrying underline here is what painted a continuous
-			// underscore across blank space under apps that set underline then
-			// erase to end of line (lazygit). Matches st (gp->mode = 0).
-			t.lines[y][x].Mode = 0
-		}
+		t.eraseCells(t.lines[y], x0, x1+1)
 		// tide: a clear that cuts a double-width pair leaves no torn halves.
 		if x0 > 0 && t.lines[y][x0-1].Mode&attrWide != 0 {
 			t.lines[y][x0-1].Char = ' '
@@ -736,7 +788,17 @@ func (t *State) setMode(priv bool, set bool, args []int) {
 				if a != 1049 {
 					break
 				}
-				fallthrough
+				// tide: 1049 saves the cursor on a real entry and restores
+				// on ANY exit once a save exists — even an unpaired one
+				// (tmux restores "even if the alternate screen is not in
+				// use"); an exit before any save must not yank the cursor
+				// to a never-saved home. Matches tmux, fuzz-verified.
+				if set && !alt {
+					t.saveCursor()
+					t.altSaved = true
+				} else if !set && t.altSaved {
+					t.restoreCursor()
+				}
 			case 1048:
 				if set {
 					t.saveCursor()

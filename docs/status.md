@@ -141,7 +141,9 @@ scrubbed environment (spec: capability model).
 ## Known v0 limits (accepted, flagged in code)
 
 - Latest-wins client sizing across simultaneously attached clients of
-  different sizes (discarded rows go to scrollback, never lost).
+  different sizes (rows sliding off the top of a shrink go to scrollback
+  and are pulled back on grow, tmux-style; rows cut below the cursor are
+  dropped, as tmux/xterm do).
 - Selection drift when a pane's history ring is at capacity; no
   double-click word-select yet; combining characters not modeled.
 - JSON+base64 frame encoding and full-pane-rect redraws (no intra-pane

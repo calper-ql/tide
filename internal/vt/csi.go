@@ -182,6 +182,13 @@ func (t *State) handleCSI() {
 			t.clear(0, t.cur.Y, t.cur.X, t.cur.Y)
 		case 2: // all
 			t.clear(0, 0, t.cols-1, t.rows-1)
+			// tide: a full clear ends the "scrolled away" era — growth must
+			// not shove pre-clear scrollback back over the fresh screen
+			// (tmux resets hscrolled here). Alt-screen clears (vim redraws)
+			// leave the main screen's budget alone.
+			if t.mode&ModeAltScreen == 0 {
+				t.histScrolled = 0
+			}
 		case 3: // tide: clear scrollback (xterm). The screen is untouched.
 			t.clearHistory()
 		default:

@@ -395,3 +395,133 @@ func TestSnapshotIsParseableANSI(t *testing.T) {
 		t.Fatal("snapshot missing bracketed-paste restore")
 	}
 }
+
+func TestResizeGrowPullsHistoryBack(t *testing.T) {
+	a := New(20, 6, 100, nil)
+	a.Write([]byte("1\r\n2\r\n3\r\n4\r\n5\r\n$ "))
+	a.Resize(20, 4) // 1 and 2 leave through the history ring
+	if a.HistoryLen() != 2 {
+		t.Fatalf("HistoryLen after shrink = %d, want 2", a.HistoryLen())
+	}
+	a.Resize(20, 6) // growth pulls them back: content stays bottom-anchored
+	a.State.lock()
+	defer a.State.unlock()
+	if a.HistoryLen() != 0 {
+		t.Fatalf("HistoryLen after grow = %d, want 0", a.HistoryLen())
+	}
+	want := []string{"1", "2", "3", "4", "5", "$"}
+	for i, w := range want {
+		if got := lineText(a.lines[i]); got != w {
+			t.Fatalf("row %d = %q, want %q", i, got, w)
+		}
+	}
+	if a.cur.Y != 5 || a.cur.X != 2 {
+		t.Fatalf("cursor = (%d,%d), want (2,5)", a.cur.X, a.cur.Y)
+	}
+}
+
+func TestResizeShrinkDropsBelowCursorRows(t *testing.T) {
+	// Rows cut off BELOW the cursor are dropped (tmux/xterm), never pushed:
+	// pushing them would put below-cursor content above the screen in
+	// scrollback order.
+	a := New(20, 6, 100, nil)
+	a.Write([]byte("A\r\nB\r\nC\r\nD\x1b[2;1H")) // cursor on row 1 (B)
+	a.Resize(20, 2)
+	a.State.lock()
+	if a.HistoryLen() != 0 {
+		t.Fatalf("HistoryLen = %d, want 0 (C/D dropped, not pushed)", a.HistoryLen())
+	}
+	if got := lineText(a.lines[0]); got != "A" {
+		t.Fatalf("row 0 = %q, want A", got)
+	}
+	if got := lineText(a.lines[1]); got != "B" {
+		t.Fatalf("row 1 = %q, want B", got)
+	}
+	a.State.unlock()
+	a.Resize(20, 6) // nothing to pull; blanks appear below
+	a.State.lock()
+	defer a.State.unlock()
+	if got := strings.TrimSpace(lineText(a.lines[2])); got != "" {
+		t.Fatalf("row 2 = %q, want blank", got)
+	}
+}
+
+func TestResizeUnderAltRestoresMainOnExit(t *testing.T) {
+	// The main grid keeps round-tripping through history while an alt-screen
+	// app is up (tmux-verified: shrink+grow under vim, then exit, restores
+	// the shell screen exactly); the alt grid itself never touches history.
+	a := New(20, 6, 100, nil)
+	a.Write([]byte("1\r\n2\r\n3\r\n4\r\n5\r\n$ "))
+	a.Write([]byte("\x1b[?1049h\x1b[2J\x1b[Halt"))
+	a.Resize(20, 4)
+	a.Resize(20, 6)
+	a.Write([]byte("\x1b[?1049l")) // back to main: fully restored
+	a.State.lock()
+	defer a.State.unlock()
+	if a.HistoryLen() != 0 {
+		t.Fatalf("HistoryLen = %d, want 0 (main pulled back under alt)", a.HistoryLen())
+	}
+	want := []string{"1", "2", "3", "4", "5", "$"}
+	for i, w := range want {
+		if got := lineText(a.lines[i]); got != w {
+			t.Fatalf("main row %d after alt roundtrip = %q, want %q", i, got, w)
+		}
+	}
+	if a.cur.Y != 5 || a.cur.X != 2 {
+		t.Fatalf("restored cursor = (%d,%d), want (2,5)", a.cur.X, a.cur.Y)
+	}
+}
+
+func TestResizeGrowAfterClearStaysTopAnchored(t *testing.T) {
+	// Growth spends the blank slack below the content before pulling from
+	// history (tmux-verified): a just-cleared screen must not have old
+	// scrollback shoved back on top of the fresh prompt.
+	a := New(20, 6, 100, nil)
+	for i := 0; i < 12; i++ {
+		fmt.Fprintf(a, "line%02d\r\n", i)
+	}
+	a.Write([]byte("\x1b[2J\x1b[1;1H$ ")) // clear + prompt at top
+	hist := a.HistoryLen()
+	a.Resize(20, 10)
+	a.State.lock()
+	defer a.State.unlock()
+	if a.HistoryLen() != hist {
+		t.Fatalf("HistoryLen = %d, want %d (no pull into a cleared screen)", a.HistoryLen(), hist)
+	}
+	if got := lineText(a.lines[0]); got != "$" {
+		t.Fatalf("row 0 = %q, want %q", got, "$")
+	}
+	if a.cur.Y != 0 {
+		t.Fatalf("cursor row = %d, want 0", a.cur.Y)
+	}
+}
+
+func TestResizePullAfterRingWrap(t *testing.T) {
+	// Pulling from a WRAPPED ring must leave it consistent: the next push
+	// lands in the popped slot, not over a live line, and no history read
+	// panics (the ring slice must never shrink below the wrap point).
+	a := New(20, 4, 6, nil) // tiny ring so it wraps fast
+	for i := 0; i < 20; i++ {
+		fmt.Fprintf(a, "L%02d\r\n", i)
+	}
+	// 17 lines scrolled through the 4-row screen; the wrapped ring holds
+	// L11..L16 and the screen shows L17 L18 L19 with the cursor below.
+	a.Resize(20, 2) // slide 2: L17 L18 join the (still wrapped) ring
+	a.Resize(20, 4) // pull L17 L18 back out of the wrapped ring
+	a.Write([]byte("X1\r\nX2\r\nX3\r\n")) // re-pushes L17 L18 L19
+	a.State.lock()
+	defer a.State.unlock()
+	if a.HistoryLen() != 6 {
+		t.Fatalf("HistoryLen = %d, want 6", a.HistoryLen())
+	}
+	want := []string{"L14", "L15", "L16", "L17", "L18", "L19"}
+	for i, w := range want {
+		if got := lineText(a.historyLine(i)); got != w {
+			var all []string
+			for j := 0; j < a.HistoryLen(); j++ {
+				all = append(all, lineText(a.historyLine(j)))
+			}
+			t.Fatalf("history[%d] = %q, want %q (full: %v)", i, got, w, all)
+		}
+	}
+}

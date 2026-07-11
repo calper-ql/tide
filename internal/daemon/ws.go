@@ -324,6 +324,14 @@ func (w *ws) recomputeLocked() {
 		if p := w.panes[id]; p != nil {
 			c := contentRect(r)
 			p.resize(c.W, c.H)
+			// A grow can pull scrollback lines back onto the screen; an
+			// offset past the shrunken history would freeze the view and
+			// lie in the bar badge (View clamps, the badge does not).
+			if s := w.scroll[id]; s > 0 {
+				if hist, _, _ := p.term.ContentSize(); s > hist {
+					w.scroll[id] = hist
+				}
+			}
 		}
 	}
 }
