@@ -118,16 +118,6 @@ draggable path-labeled tabs, minimal editing with save/undo, chroma-based syntax
 highlighting, and a markdown raw/preview toggle. tide owns the tiling; teddy is just the
 editor in the pane.
 
-## Security: losing a connection while typing a password
-
-If a remote connection drops while you're typing **blind** into a no-echo prompt (an SSH,
-`sudo`, or `read -s` password), the naive outcome is dangerous: the terminal falls back to
-your **local** shell, which reads the rest of what you type as a command and records the
-password in `~/.bash_history`. tide prevents this — on an unexpected disconnect it *holds*
-the terminal, tells you what happened, and discards every keystroke through the next Enter
-so the secret can never reach your shell or its history. The design and its invariants are
-documented in **[docs/security-input-guard.md](docs/security-input-guard.md)**.
-
 ## How it's built
 
 ```
