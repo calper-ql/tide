@@ -506,8 +506,8 @@ func TestResizePullAfterRingWrap(t *testing.T) {
 	}
 	// 17 lines scrolled through the 4-row screen; the wrapped ring holds
 	// L11..L16 and the screen shows L17 L18 L19 with the cursor below.
-	a.Resize(20, 2) // slide 2: L17 L18 join the (still wrapped) ring
-	a.Resize(20, 4) // pull L17 L18 back out of the wrapped ring
+	a.Resize(20, 2)                       // slide 2: L17 L18 join the (still wrapped) ring
+	a.Resize(20, 4)                       // pull L17 L18 back out of the wrapped ring
 	a.Write([]byte("X1\r\nX2\r\nX3\r\n")) // re-pushes L17 L18 L19
 	a.State.lock()
 	defer a.State.unlock()

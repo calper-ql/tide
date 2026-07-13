@@ -34,3 +34,6 @@ go.work.sum
 # Local build/test artifacts
 bin/
 .cache/
+# stray binaries built into the repo root (build output belongs in bin/)
+/tide
+/teddy
