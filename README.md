@@ -136,6 +136,21 @@ per-session compositor renders grids + chrome into positioned-ANSI frames, and c
 paint them. See **[docs/DESIGN.md](docs/DESIGN.md)** for the full design, and
 **[docs/security-input-guard.md](docs/security-input-guard.md)** for the connection-loss guard.
 
+## Roadmap
+
+Planned, not yet built:
+
+- **Rebind keys from the UI.** The keymap is meant to be editable from inside tide itself —
+  config files are not a user-facing concept, so there's nowhere to hand-edit a keymap and
+  nothing to sync.
+- **Shareable keymaps via a hash.** Encode your keymap into a short string you can paste to a
+  teammate; paste theirs to adopt it. One dialect, easy to pass around.
+- **Move panes, don't just split them.** Drag a pane's bar to re-drop it elsewhere in the
+  layout — the mouse analog of i3's window move (splitting and resizing already work).
+
+For the honest list of what each tool does and doesn't do today, see
+[docs/DESIGN.md](docs/DESIGN.md).
+
 ## Development
 
 ```sh
