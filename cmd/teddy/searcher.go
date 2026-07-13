@@ -16,7 +16,8 @@ const (
 	searchTextCap     = 240     // cap a result line's stored width
 )
 
-// searchOpts is a query plus the VS Code-style match modifiers.
+// searchOpts is a query plus the standard match modifiers (match-case,
+// whole-word, regex).
 type searchOpts struct {
 	query      string
 	matchCase  bool

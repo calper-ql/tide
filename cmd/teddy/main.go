@@ -1,5 +1,5 @@
-// Command teddy is tide's editor: a standalone terminal editor with a
-// VS Code-lineage activity bar, a collapsible file browser, draggable
+// Command teddy is tide's editor: a standalone terminal editor with an
+// activity bar, a collapsible file browser, draggable
 // path-labeled tabs, and a single editor/viewer area (tide owns tiling).
 // It runs with no daemon; inside a tide session it discovers TIDE_SESSION
 // and the tab drag is delivered through tide (the T2 increment).

@@ -20,8 +20,8 @@ work keeps running; reattach from the same box or from your laptop over SSH. Eve
 framed and every control is clickable, so splitting, resizing, and switching are
 discoverable without memorizing chords — but the chords are there too.
 
-It ships with **`teddy`**, a small terminal editor (a VS Code-lineage activity bar, a file
-tree, syntax highlighting) that integrates with tide.
+It ships with **`teddy`**, a small terminal editor (an activity bar, a file tree, syntax
+highlighting) that integrates with tide.
 
 ---
 

@@ -57,7 +57,7 @@ func (a *App) drawActivityBar(buf *tui.Buffer, r tui.Rect) {
 		selected := i == a.selected && !a.sideCollapsed
 		if selected {
 			st = stAccent
-			buf.Set(r.X, y, '▎', stAccent) // VS Code's active-icon left bar
+			buf.Set(r.X, y, '▎', stAccent) // active-activity left accent bar
 		}
 		buf.Set(cx, y, []rune(act.icon)[0], st)
 	}

@@ -294,9 +294,10 @@ outside a tide pane. (The daemon injects `TIDE_SESSION` into pane environments, 
 not read it — the cross-tide tab tear-off that integration is designed for is not yet built.) Its root is the folder you open it in, taken verbatim — unlike `tide`, teddy does *not*
 walk up to a `.git`, so the browser and search stay scoped to that subtree.
 
-The layout is VS Code lineage: a fixed activity bar (Explorer / Search / Source Control), a
-collapsible, draggable side panel, a path-labeled draggable tab strip, one editor/viewer area
-(tide owns tiling; teddy never tiles internally), and a status bar with an actions-menu pill.
+The layout is the familiar graphical-editor shape: a fixed activity bar (Explorer / Search /
+Source Control), a collapsible, draggable side panel, a path-labeled draggable tab strip, one
+editor/viewer area (tide owns tiling; teddy never tiles internally), and a status bar with an
+actions-menu pill.
 All three activities are live:
 
 - **Explorer** — a lazy file tree that reconciles with disk on a 2 s poll while it is on

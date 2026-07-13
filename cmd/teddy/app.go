@@ -13,8 +13,8 @@ import (
 // teddy show up on their own. Tune it here.
 const gitPollInterval = 2 * time.Second
 
-// activityW is the fixed width of the far-left activity bar (VS Code's
-// vertical icon strip). defaultSideWidth is the explorer panel's width.
+// activityW is the fixed width of the far-left activity bar (the vertical
+// icon strip). defaultSideWidth is the explorer panel's width.
 const (
 	activityW        = 4 // icon column + a gap before the right-edge separator
 	defaultSideWidth = 28
