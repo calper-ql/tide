@@ -132,3 +132,54 @@ func mustWrite(t *testing.T, p string) {
 		t.Fatal(err)
 	}
 }
+
+// TestBrowserRefreshTracksDisk verifies the poll refresh picks up files created
+// and deleted outside teddy, keeps expanded folders expanded, and holds the
+// selection on the same file across the reconcile.
+func TestBrowserRefreshTracksDisk(t *testing.T) {
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "sub")
+	mustMkdir(t, sub)
+	mustWrite(t, filepath.Join(sub, "inner.txt"))
+	mustWrite(t, filepath.Join(dir, "b.txt"))
+
+	b := newBrowser(dir)
+	noop := func(string) error { return nil }
+	// Expand sub/ and select its inner file.
+	b.activate(0, noop) // sub/ is row 0 (dirs first)
+	for i, e := range b.flat {
+		if e.node.name == "inner.txt" {
+			b.sel = i
+		}
+	}
+	if len(b.flat) != 3 { // sub/, inner.txt, b.txt
+		t.Fatalf("setup rows = %v, want 3", names(b))
+	}
+
+	// Create a new file at root and a new one inside the expanded sub/, and
+	// delete b.txt — all outside teddy.
+	mustWrite(t, filepath.Join(dir, "a.txt"))
+	mustWrite(t, filepath.Join(sub, "inner2.txt"))
+	if err := os.Remove(filepath.Join(dir, "b.txt")); err != nil {
+		t.Fatal(err)
+	}
+
+	b.refresh()
+
+	got := names(b)
+	// sub/ stays expanded (still shows its children), new files appear, b.txt gone.
+	want := map[string]bool{"sub": true, "inner.txt": true, "inner2.txt": true, "a.txt": true}
+	for _, n := range got {
+		if n == "b.txt" {
+			t.Errorf("b.txt still present after deletion: %v", got)
+		}
+		delete(want, n)
+	}
+	if len(want) != 0 {
+		t.Errorf("refresh missing entries %v; tree = %v", want, got)
+	}
+	// Selection stayed on inner.txt.
+	if b.sel < 0 || b.sel >= len(b.flat) || b.flat[b.sel].node.name != "inner.txt" {
+		t.Errorf("selection drifted off inner.txt: sel=%d tree=%v", b.sel, got)
+	}
+}

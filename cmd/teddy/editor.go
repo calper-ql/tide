@@ -57,6 +57,8 @@ type doc struct {
 	preview    bool // markdown viz vs raw (only meaningful for .md)
 	previewTop int  // viz scroll offset
 
+	diff *diffDoc // non-nil for a read-only changes (diff) view
+
 	hlLines [][]highlight.Span // cached per-line syntax spans
 	hlReady bool               // false when hlLines needs recomputing
 
@@ -551,13 +553,20 @@ func (d *doc) scrollToCursor() {
 // --- App integration ---
 
 func (a *App) saveActive() {
-	if d := a.activeDoc(); d != nil {
+	if d := a.activeDoc(); d != nil && !d.readOnly() {
 		_ = d.save()
+		if a.selected == 2 && a.git.available {
+			a.refreshGit() // keep the source-control panel current after a save
+		}
 	}
 }
 
 func (a *App) reloadActive() {
 	if d := a.activeDoc(); d != nil {
+		if d.diff != nil {
+			a.rebuildDiff(d) // re-run the diff
+			return
+		}
 		_ = d.reload()
 	}
 }
@@ -574,6 +583,10 @@ func (a *App) drawEditor(buf *tui.Buffer, r tui.Rect) {
 	if d == nil {
 		msg := "teddy — open a file from the explorer"
 		drawIn(buf, r, max((r.W-strWidth(msg))/2, 0), r.H/2, stHint, msg)
+		return
+	}
+	if d.diff != nil {
+		a.drawDiff(buf, r, d)
 		return
 	}
 	if d.isMarkdownPreview() {

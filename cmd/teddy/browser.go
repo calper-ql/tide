@@ -67,13 +67,76 @@ func (b *browser) load(n *treeNode) {
 			isDir: e.IsDir(),
 		})
 	}
-	sort.Slice(n.children, func(i, j int) bool {
-		a, c := n.children[i], n.children[j]
+	sortNodes(n.children)
+}
+
+// sortNodes orders siblings dirs-first, then case-insensitively by name.
+func sortNodes(nodes []*treeNode) {
+	sort.Slice(nodes, func(i, j int) bool {
+		a, c := nodes[i], nodes[j]
 		if a.isDir != c.isDir {
 			return a.isDir
 		}
 		return strings.ToLower(a.name) < strings.ToLower(c.name)
 	})
+}
+
+// refresh re-reads every loaded directory from disk, adding entries that
+// appeared and dropping ones that vanished, while preserving each folder's
+// expansion state, the selection (by path), and scroll. This is what lets the
+// Explorer track files created/deleted outside teddy with no manual poke.
+func (b *browser) refresh() {
+	selPath := ""
+	if b.sel >= 0 && b.sel < len(b.flat) {
+		selPath = b.flat[b.sel].node.path
+	}
+	b.refreshNode(b.root)
+	b.reflatten()
+	if selPath != "" { // keep the selection on the same file, if it survived
+		for i, e := range b.flat {
+			if e.node.path == selPath {
+				b.sel = i
+				break
+			}
+		}
+	}
+}
+
+// refreshNode reconciles one loaded directory's children with disk, reusing
+// existing nodes (so expanded subtrees stay expanded) and recursing into
+// still-loaded subdirectories.
+func (b *browser) refreshNode(n *treeNode) {
+	if !n.isDir || !n.loaded {
+		return
+	}
+	entries, err := os.ReadDir(n.path)
+	if err != nil {
+		return // unreadable (e.g. deleted out from under us) — leave as-is
+	}
+	existing := make(map[string]*treeNode, len(n.children))
+	for _, c := range n.children {
+		existing[c.name] = c
+	}
+	var children []*treeNode
+	for _, e := range entries {
+		if e.Name() == ".git" {
+			continue
+		}
+		if c, ok := existing[e.Name()]; ok && c.isDir == e.IsDir() {
+			children = append(children, c) // reuse, keeping expanded/loaded state
+		} else {
+			children = append(children, &treeNode{
+				name:  e.Name(),
+				path:  filepath.Join(n.path, e.Name()),
+				isDir: e.IsDir(),
+			})
+		}
+	}
+	sortNodes(children)
+	n.children = children
+	for _, c := range children {
+		b.refreshNode(c)
+	}
 }
 
 // reflatten rebuilds the visible-row list from the expanded tree.
@@ -212,6 +275,16 @@ func (a *App) drawBrowser(buf *tui.Buffer, inner tui.Rect) {
 		}
 		drawIn(buf, inner, 1+e.depth*2, y, st, marker+name)
 	}
+}
+
+// autoRefreshBrowser is the poll-tick refresh for the Explorer: it re-reads
+// the tree only while the panel is on screen, so teddy does no directory
+// walking when the Explorer isn't visible.
+func (a *App) autoRefreshBrowser() {
+	if a.selected != 0 || a.sideCollapsed {
+		return
+	}
+	a.browser.refresh()
 }
 
 // clickBrowser maps a click in the side panel to a tree row and activates it.

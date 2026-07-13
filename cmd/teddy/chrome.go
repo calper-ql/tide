@@ -79,8 +79,8 @@ func (a *App) drawSidePanel(buf *tui.Buffer, r tui.Rect) {
 		a.drawBrowser(buf, inner)
 	case 1:
 		a.drawSearch(buf, inner)
-	default:
-		drawIn(buf, inner, 1, 2, stHint, "not yet")
+	case 2:
+		a.drawGit(buf, inner)
 	}
 }
 
@@ -105,7 +105,7 @@ func (a *App) drawStatusBar(buf *tui.Buffer, r tui.Rect) {
 
 	// Clickable markdown viz/raw pill (Ctrl+E also toggles).
 	a.mdToggle = tui.Rect{}
-	if d := a.activeDoc(); d != nil && isMarkdown(d.path) {
+	if d := a.activeDoc(); d != nil && d.diff == nil && isMarkdown(d.path) {
 		mode := "raw"
 		if d.preview {
 			mode = "viz"
@@ -113,6 +113,19 @@ func (a *App) drawStatusBar(buf *tui.Buffer, r tui.Rect) {
 		px := x - r.X + 1
 		mend := drawIn(buf, r, px, 0, stAccentPill, " md:"+mode+" ")
 		a.mdToggle = tui.Rect{X: r.X + px, Y: r.Y, W: mend - (r.X + px), H: 1}
+		x = mend
+	}
+
+	// Clickable diff layout pill (Ctrl+D also toggles), shown for diff tabs.
+	a.diffToggle = tui.Rect{}
+	if d := a.activeDoc(); d != nil && d.diff != nil {
+		mode := "inline"
+		if a.diffMode == diffSideBySide {
+			mode = "side"
+		}
+		px := x - r.X + 1
+		mend := drawIn(buf, r, px, 0, stAccentPill, " diff:"+mode+" ")
+		a.diffToggle = tui.Rect{X: r.X + px, Y: r.Y, W: mend - (r.X + px), H: 1}
 		x = mend
 	}
 

@@ -2,10 +2,16 @@ package main
 
 import (
 	"context"
+	"time"
 
 	"github.com/calper-ql/tide/internal/input"
 	"github.com/calper-ql/tide/internal/tui"
 )
+
+// gitPollInterval is how often the Source Control panel re-reads git status
+// while it (or a diff tab) is on screen, so on-disk changes made outside
+// teddy show up on their own. Tune it here.
+const gitPollInterval = 2 * time.Second
 
 // activityW is the fixed width of the far-left activity bar (VS Code's
 // vertical icon strip). defaultSideWidth is the explorer panel's width.
@@ -16,9 +22,7 @@ const (
 	minEditorWidth   = 20 // keep at least this many columns for the editor
 )
 
-// activity is one button in the activity bar. Only Explorer is wired in T1;
-// Search and Git render but are inert (the spec: "don't need all of them
-// immediately").
+// activity is one button in the activity bar.
 type activity struct {
 	icon    string
 	title   string
@@ -28,7 +32,7 @@ type activity struct {
 var activities = []activity{
 	{"≣", "EXPLORER", true},
 	{"⚲", "SEARCH", true},
-	{"⎇", "SOURCE CONTROL", false},
+	{"⎇", "SOURCE CONTROL", true},
 }
 
 // regions is the computed geometry of teddy's panels for one frame.
@@ -98,6 +102,9 @@ type App struct {
 	searchSeq    int
 	searchCancel context.CancelFunc
 
+	git      gitState
+	diffMode diffMode // inline vs side-by-side, shared by every open diff
+
 	tabFirst    int      // first tab drawn (strip scroll)
 	tabMaxFirst int      // largest tabFirst that still reaches the last tab (no trailing gap)
 	tabHits     []tabHit // drawn tab extents, for hit-testing
@@ -105,8 +112,9 @@ type App struct {
 	dragMoved   bool
 	pressClose  int // tab whose close glyph was pressed, or -1
 
-	mdToggle tui.Rect // status-bar markdown viz/raw toggle, for hit-testing
-	teddyHit tui.Rect // the "teddy ▴" pill — opens the actions menu
+	mdToggle   tui.Rect // status-bar markdown viz/raw toggle, for hit-testing
+	teddyHit   tui.Rect // the "teddy ▴" pill — opens the actions menu
+	diffToggle tui.Rect // status-bar diff layout pill, for hit-testing
 
 	menuOpen  bool
 	menuItems []menuItem
@@ -124,6 +132,7 @@ func newApp(scr *tui.Screen, root string) *App {
 		sideWidth: defaultSideWidth,
 		browser:   newBrowser(root),
 		search:    searchState{omitHidden: true}, // skip dotfiles by default
+		diffMode:  defaultDiffMode,
 		dragFrom:  -1, pressClose: -1,
 	}
 }
@@ -136,6 +145,12 @@ func (a *App) Run() error {
 	}
 	a.searchCh = make(chan searchMsg, 8)
 	events := a.screen.Events()
+
+	// Poll git while Source Control is on screen, so changes made outside teddy
+	// surface without a manual refresh. Ticks are dropped if the loop is busy.
+	ticker := time.NewTicker(gitPollInterval)
+	defer ticker.Stop()
+
 	a.render()
 	for !a.quit {
 		select {
@@ -143,6 +158,9 @@ func (a *App) Run() error {
 			a.handle(ev)
 		case msg := <-a.searchCh:
 			a.applySearch(msg)
+		case <-ticker.C:
+			a.autoRefreshGit()
+			a.autoRefreshBrowser()
 		}
 		// Coalesce any queued input + search results into one render.
 		for draining := true; draining; {
@@ -175,6 +193,8 @@ func (a *App) handle(ev tui.Event) {
 		case input.EvPaste:
 			if a.searchActive() {
 				a.startSearch(a.search.query + string(ev.Input.Paste))
+			} else if a.gitActive() {
+				a.git.commitMsg += string(ev.Input.Paste)
 			} else if d := a.activeDoc(); d != nil {
 				d.breakUndo()
 				d.insertString(string(ev.Input.Paste))
@@ -213,6 +233,9 @@ func (a *App) handleKey(ev input.Event) {
 		case 'r':
 			a.reloadActive()
 			return
+		case 'd':
+			a.toggleDiffMode()
+			return
 		case 'z':
 			if d != nil {
 				d.Undo()
@@ -231,7 +254,15 @@ func (a *App) handleKey(ev input.Event) {
 		a.handleSearchKey(ev)
 		return
 	}
+	if a.gitActive() {
+		a.handleGitKey(ev)
+		return
+	}
 	if d != nil {
+		if d.readOnly() {
+			a.diffKey(d, ev) // a diff view only scrolls
+			return
+		}
 		d.handleKey(ev)
 		d.scrollToCursor()
 	}
@@ -285,6 +316,10 @@ func (a *App) handleMouse(ev input.Event) {
 		a.togglePreview()
 		return
 	}
+	if a.diffToggle.Contains(ev.X, ev.Y) {
+		a.toggleDiffMode()
+		return
+	}
 	// The sidebar/editor divider (the panel's right border) resizes on drag.
 	if !a.sideCollapsed && a.last.side.W > 0 {
 		dividerX := a.last.side.X + a.last.side.W - 1
@@ -306,8 +341,15 @@ func (a *App) handleMouse(ev input.Event) {
 			} else {
 				a.selected = idx
 				a.sideCollapsed = false
+				switch idx {
+				case 0:
+					a.browser.refresh() // re-read the tree each time it opens
+				case 2:
+					a.refreshGit() // re-read status each time the panel opens
+				}
 			}
 			a.search.focused = a.selected == 1 && !a.sideCollapsed
+			a.git.commitFocus = a.git.commitFocus && a.selected == 2 && !a.sideCollapsed
 		}
 		return
 	}
@@ -317,6 +359,8 @@ func (a *App) handleMouse(ev input.Event) {
 			a.clickBrowser(ev.Y)
 		case 1:
 			a.clickSearch(ev.X, ev.Y)
+		case 2:
+			a.clickGit(ev.X, ev.Y)
 		}
 		return
 	}
@@ -342,13 +386,18 @@ func (a *App) wheel(ev input.Event, delta int) {
 			a.browser.scroll(delta)
 		case 1:
 			a.search.top = clampInt(a.search.top+delta, 0, max(len(a.search.results)-1, 0))
+		case 2:
+			a.git.top = clampInt(a.git.top+delta, 0, max(len(a.git.rows)-1, 0))
 		}
 		return
 	}
 	if d := a.activeDoc(); d != nil && a.last.editor.Contains(ev.X, ev.Y) {
-		if d.isMarkdownPreview() {
+		switch {
+		case d.diff != nil:
+			d.diff.top = max(d.diff.top+delta, 0) // clamped in drawDiff
+		case d.isMarkdownPreview():
 			d.previewTop = max(d.previewTop+delta, 0)
-		} else {
+		default:
 			d.top = clampInt(d.top+delta, 0, max(len(d.lines)-1, 0))
 		}
 	}
@@ -357,6 +406,9 @@ func (a *App) wheel(ev input.Event, delta int) {
 // clickEditor places the cursor at the clicked cell, mapping through the
 // gutter, scroll offsets, and tab/wide-rune expansion.
 func (a *App) clickEditor(d *doc, x, y int) {
+	if d.readOnly() {
+		return // a diff view has no cursor to place
+	}
 	r := a.last.editor
 	gw := gutterWidth(len(d.lines))
 	d.cy = clampInt(d.top+(y-r.Y), 0, len(d.lines)-1)

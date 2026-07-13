@@ -94,6 +94,9 @@ func tabLabels(tabs []*doc) []string {
 		} else {
 			out[i] = base[i]
 		}
+		if d.diff != nil {
+			out[i] = "⬌ " + out[i] // a diff (changes) tab
+		}
 	}
 	return out
 }

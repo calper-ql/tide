@@ -45,6 +45,13 @@ var (
 	stHlBuiltin = tui.DefaultStyle.WithFG(tui.Cyan)
 	stHlError   = tui.DefaultStyle.WithFG(tui.BrightRed)
 
+	// diff viewer: added green, removed red, context faded, hunk header cyan
+	stDiffAdd  = tui.DefaultStyle.WithFG(tui.Green)
+	stDiffDel  = tui.DefaultStyle.WithFG(tui.Red)
+	stDiffCtx  = tui.DefaultStyle.Fainted()
+	stDiffHunk = tui.DefaultStyle.WithFG(tui.Cyan).Fainted()
+	stDiffNum  = tui.DefaultStyle.Fainted()
+
 	// markdown viz
 	stMdHeading = tui.DefaultStyle.WithFG(tui.Cyan).Bolded()
 	stMdCode    = tui.DefaultStyle.WithFG(tui.Green)
