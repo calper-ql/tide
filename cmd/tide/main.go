@@ -4,6 +4,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -241,18 +243,23 @@ func attach(rt, target string, here bool) error {
 // remoteAttach() — the only difference between the two is how the connection
 // is obtained, never how it is driven.
 func streamSession(c *protocol.Conn, stdinFd int, snap []byte, winch <-chan os.Signal, connLostMsg string, extraTeardown func()) (string, error) {
-	oldState, err := term.MakeRaw(stdinFd)
+	pristine, err := term.MakeRaw(stdinFd)
 	if err != nil {
 		return "", err
 	}
-	var restoreOnce sync.Once
-	restore := func() {
-		restoreOnce.Do(func() {
-			os.Stdout.WriteString(resetSequences)
-			_ = term.Restore(stdinFd, oldState)
+	// Restore is split in two so an UNEXPECTED disconnect can leave tide's
+	// screen modes (alt screen, mouse, kitty) while keeping the terminal RAW —
+	// the guard below needs raw mode to swallow keystrokes without echoing a
+	// secret — and only return to cooked mode once the guard is done.
+	var screenLeft, ttyRestored sync.Once
+	leaveScreen := func() { screenLeft.Do(func() { os.Stdout.WriteString(resetSequences) }) }
+	restoreTTY := func() {
+		ttyRestored.Do(func() {
+			_ = term.Restore(stdinFd, pristine)
 			fmt.Println()
 		})
 	}
+	restore := func() { leaveScreen(); restoreTTY() }
 	defer restore()
 	os.Stdout.WriteString(enterSequences)
 	if len(snap) > 0 {
@@ -261,28 +268,38 @@ func streamSession(c *protocol.Conn, stdinFd int, snap []byte, winch <-chan os.S
 		}
 	}
 
+	// lost latches the instant the connection is gone (a recv/send error, not
+	// a clean detach). It flips the single stdin owner below from FORWARDING
+	// to GUARDING: it keeps reading keystrokes and discards them until Enter,
+	// so a password the user is still typing — blind, into an ssh/sudo/`read
+	// -s` prompt that dropped with the connection — cannot fall through to the
+	// local shell, which would run the line and write the secret into
+	// ~/.bash_history / ~/.zsh_history. streamSession owning stdin start to
+	// finish is what makes this safe: while tide holds the fd, the shell
+	// cannot read those bytes. (See docs/security-input-guard.md.)
+	var lost atomic.Bool
+	guardDone := make(chan struct{})
+
 	type result struct {
 		reason string
 		err    error
 	}
 	done := make(chan result, 2)
 
-	// Keyboard/mouse → daemon, raw. The daemon's router owns the keymap;
-	// the client intercepts nothing (spec: one control scheme).
+	// The single stdin owner. Raw bytes → daemon while connected (the daemon's
+	// router owns the keymap; the client intercepts nothing — spec: one
+	// control scheme). Once the connection is lost it discards every keystroke
+	// through the next Enter, then releases so the terminal can go cooked.
 	go func() {
-		buf := make([]byte, 4096)
-		for {
-			n, rerr := os.Stdin.Read(buf)
-			if n > 0 {
-				if serr := client.SendInput(c, append([]byte(nil), buf[:n]...)); serr != nil {
-					done <- result{err: serr}
-					return
-				}
-			}
-			if rerr != nil {
-				done <- result{reason: "stdin closed — detached; session keeps running"}
-				return
-			}
+		defer close(guardDone)
+		outcome, firstLoss := stdinPump(os.Stdin, func(b []byte) error { return client.SendInput(c, b) }, &lost)
+		switch {
+		case firstLoss:
+			// This pump was first to see the connection drop (a send error):
+			// wake the main loop so it shows the notice and reaps the peer.
+			done <- result{err: errors.New(connLostMsg)}
+		case outcome == pumpStdinEOF:
+			done <- result{reason: "stdin closed — detached; session keeps running"}
 		}
 	}()
 
@@ -295,6 +312,7 @@ func streamSession(c *protocol.Conn, stdinFd int, snap []byte, winch <-chan os.S
 		for {
 			m, rerr := c.Recv()
 			if rerr != nil {
+				lost.Store(true)
 				done <- result{err: errors.New(connLostMsg)}
 				return
 			}
@@ -343,8 +361,108 @@ func streamSession(c *protocol.Conn, stdinFd int, snap []byte, winch <-chan os.S
 			teardown()
 			return "detached — session keeps running; reattach to resume", nil
 		case r := <-done:
+			if r.err != nil {
+				// Unexpected loss (not a clean detach/kill): hold the terminal
+				// so nothing the user is still typing — a password most of all
+				// — escapes to the shell and its history. Leave the alt screen
+				// so the notice lands on the shell screen, but stay RAW while
+				// the stdin owner discards input until the user presses Enter.
+				// While we block on <-guardDone below we are OUT of the select
+				// loop, so SIGTERM/SIGHUP are buffered but not serviced: the
+				// hold is released only by Enter, the terminal actually closing
+				// (stdin EOF), or SIGKILL. That is deliberate — honoring a
+				// signal here would restore cooked mode with the secret still
+				// queued, reintroducing the leak. See docs/security-input-guard.md.
+				lost.Store(true)
+				c.Close()
+				<-outputDone
+				leaveScreen()
+				fmt.Print("\r\n" + connLostNotice + "\r\n")
+				<-guardDone
+				if extraTeardown != nil {
+					extraTeardown()
+				}
+				restoreTTY()
+				return r.reason, r.err
+			}
 			teardown()
 			return r.reason, r.err
+		}
+	}
+}
+
+// connLostNotice is shown when a session's connection drops unexpectedly.
+// tide keeps the terminal (raw, no echo) until the user presses Enter — see
+// streamSession — so the message must make the hold, and the reason for it,
+// obvious.
+const connLostNotice = "\x1b[1;31m[tide] connection lost.\x1b[0m tide is holding your terminal so anything you " +
+	"were typing — a password, maybe — is discarded instead of falling through to your shell. Press Enter to continue."
+
+// pumpOutcome is how the stdin owner's loop ended.
+type pumpOutcome int
+
+const (
+	pumpLost     pumpOutcome = iota // the connection dropped; input was guarded
+	pumpStdinEOF                    // stdin closed while still connected (a clean detach)
+)
+
+// stdinPump runs the stdin owner's loop. It forwards each chunk read from r
+// via send while connected; the instant the connection is lost — send returns
+// an error, or the peer goroutine already latched lost — it stops forwarding
+// and discards input through the next Enter (the abandoned-input guard), then
+// returns pumpLost. A plain EOF while still connected returns pumpStdinEOF (a
+// clean detach: the terminal was closed). firstLoss reports whether THIS pump
+// was the first to observe the drop (via a send error), so the caller knows to
+// wake the main loop; a loss the peer already saw returns firstLoss=false.
+func stdinPump(r io.Reader, send func([]byte) error, lost *atomic.Bool) (outcome pumpOutcome, firstLoss bool) {
+	buf := make([]byte, 4096)
+	for {
+		n, rerr := r.Read(buf)
+		if n > 0 {
+			if lost.Load() {
+				guardRest(r, buf[:n])
+				return pumpLost, false
+			}
+			if err := send(append([]byte(nil), buf[:n]...)); err != nil {
+				lost.Store(true)
+				guardRest(r, buf[:n])
+				return pumpLost, true
+			}
+		}
+		if rerr != nil {
+			if lost.Load() {
+				return pumpLost, false
+			}
+			return pumpStdinEOF, false
+		}
+	}
+}
+
+// guardRest discards the just-read chunk and every keystroke after it through
+// the next Enter — unless this chunk already carried the Enter, in which case
+// the secret it terminated is already behind us.
+func guardRest(r io.Reader, chunk []byte) {
+	if !bytes.ContainsAny(chunk, "\r\n") {
+		drainUntilEnter(r)
+	}
+}
+
+// drainUntilEnter reads and discards from r until a chunk contains Enter (CR
+// or LF) or r ends. It is the core of tide's abandoned-input guard: after a
+// connection drops, the bytes the user is still typing — a password, blind,
+// into a prompt that dropped with the connection — are read HERE and thrown
+// away, so the local shell never receives the line and never records the
+// secret in its history. Reading stops at the first Enter (the keystroke that
+// would have submitted the secret), handing the terminal back cleanly.
+func drainUntilEnter(r io.Reader) {
+	buf := make([]byte, 4096)
+	for {
+		n, err := r.Read(buf)
+		if n > 0 && bytes.ContainsAny(buf[:n], "\r\n") {
+			return
+		}
+		if err != nil {
+			return
 		}
 	}
 }

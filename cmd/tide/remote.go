@@ -118,6 +118,65 @@ func shquote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
+// remoteHandshakeTimeout bounds the wait for the host's tide to answer the
+// protocol handshake over ssh. The deadline spans interactive auth (a password
+// prompt, or a 2FA push the user approves on a phone) plus the protocol
+// handshake itself, and is cleared only once the handshake completes — so it
+// is generous. A genuinely wedged remote is caught at the ceiling, and the
+// abandoned-input guard makes that fallback safe.
+const remoteHandshakeTimeout = 60 * time.Second
+
+// flushTTYInput discards everything queued in the terminal's input buffer —
+// including a partial, newline-less line the canonical (cooked) discipline
+// would otherwise hold onto, i.e. a half-typed password. It briefly makes the
+// tty non-canonical and non-blocking so a partial line becomes readable,
+// drains it, and leaves the terminal in restoreTo (pristine when we have it,
+// else whatever it found). Used when ssh dies during auth for a reason other
+// than our own timeout: the secret must not survive into the shell.
+func flushTTYInput(fd int, restoreTo *term.State) {
+	prior, err := term.MakeRaw(fd)
+	if err != nil {
+		return
+	}
+	if restoreTo == nil {
+		restoreTo = prior
+	}
+	defer func() { _ = term.Restore(fd, restoreTo) }()
+	if syscall.SetNonblock(fd, true) != nil {
+		return
+	}
+	defer func() { _ = syscall.SetNonblock(fd, false) }()
+	var buf [4096]byte
+	for {
+		n, rerr := syscall.Read(fd, buf[:])
+		if n <= 0 || rerr != nil {
+			return
+		}
+	}
+}
+
+// guardAbandonedInput holds a still-cooked terminal after a remote connection
+// dies mid-handshake — most dangerously while ssh was prompting for a password
+// the user is typing blind. If tide just returned, the shell would read the
+// rest of that password as a command and record it in its history. So we take
+// the terminal raw (no echo — the bytes are secret), say what happened, and
+// discard every keystroke through the next Enter, then restore pristine. The
+// Enter that would have submitted the password is swallowed here instead.
+func guardAbandonedInput(stdinFd int, pristine *term.State, dest string) {
+	if _, err := term.MakeRaw(stdinFd); err != nil {
+		return // can't take the terminal raw; nothing safe to do here
+	}
+	defer func() {
+		if pristine != nil {
+			_ = term.Restore(stdinFd, pristine)
+		}
+		fmt.Println()
+	}()
+	fmt.Printf("\r\n\x1b[1;31m[tide] connection to %s timed out.\x1b[0m Anything you were typing (a password?) "+
+		"is being discarded, not sent to your shell. Press Enter to return to your shell.\r\n", titleSafe(dest))
+	drainUntilEnter(os.Stdin)
+}
+
 // titlePop restores the terminal title pushed by setTitleSeq (XTWINOPS 23;0t).
 const titlePop = "\x1b[23;0t"
 
@@ -401,13 +460,34 @@ func remoteAttach(args []string) error {
 		r: stdout, w: stdin,
 		closeFn: func() error { _ = stdin.Close(); return stdout.Close() },
 	})
-	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+	// Snapshot the terminal's pristine (cooked, echo-on) state before ssh can
+	// touch it. ssh reads a password/passphrase straight from /dev/tty with
+	// echo off; if the handshake times out mid-auth and we SIGKILL ssh, that
+	// leaves the tty echo-off with a half-typed password still queued. We
+	// restore this state — and, when auth was plausibly in flight, guard the
+	// input — so the secret can't surface in the shell or its history.
+	pristine, _ := term.GetState(stdinFd)
+	_ = conn.SetDeadline(time.Now().Add(remoteHandshakeTimeout))
 	if _, herr := conn.ClientHandshake(); herr != nil {
-		// The handshake can time out with ssh still ALIVE (wedged remote, MOTD/
-		// 2FA stall). Close the pipes and kill ssh so Wait() can't block forever.
+		// A deadline hit means ssh was still ALIVE (a wedged remote, or — far
+		// more likely — an interactive auth prompt the user is answering). Any
+		// other error means ssh already exited on its own (auth refused, tide
+		// missing), leaving the tty clean. Close the pipes and kill ssh so
+		// Wait() can't block forever.
+		timedOut := errors.Is(herr, os.ErrDeadlineExceeded)
 		_ = conn.Close()
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
+		if timedOut {
+			// The user may be mid-password: hold the terminal and swallow
+			// input until Enter so nothing they typed reaches the shell.
+			guardAbandonedInput(stdinFd, pristine, dest)
+		} else {
+			// ssh exited on its own (auth refused, tide missing, remote
+			// closed). A partial password can still sit queued in the tty even
+			// here; drop it before the shell can read it, then restore cooked.
+			flushTTYInput(stdinFd, pristine)
+		}
 		return remoteDialError(dest, herr, &stderr, cmd.ProcessState)
 	}
 	_ = conn.SetDeadline(time.Time{})
