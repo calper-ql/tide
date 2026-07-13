@@ -133,8 +133,8 @@ internal/tui        teddy's cell grid + diff renderer
 
 The daemon owns everything on screen: pane PTY output parses into daemon-side VT grids, a
 per-session compositor renders grids + chrome into positioned-ANSI frames, and clients just
-paint them. See **[docs/status.md](docs/status.md)** for the current state and
-**[docs/tide-spec-v1.md](docs/tide-spec-v1.md)** for the product contract.
+paint them. See **[docs/DESIGN.md](docs/DESIGN.md)** for the full design, and
+**[docs/security-input-guard.md](docs/security-input-guard.md)** for the connection-loss guard.
 
 ## Development
 
